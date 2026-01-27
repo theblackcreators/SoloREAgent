@@ -1,0 +1,488 @@
+Absolutely. Here are (1) a Supabase SQL seed script (Program + Cohort + Quest Templates + Houston “Dungeons”), plus (2) a Next.js multi-agent scaffold layout, and (3) the two key API routes you need: /api/log and /api/generate-daily (cron).
+
+⸻
+
+1) Supabase Seed SQL (Program + Cohort + Templates + Locations)
+
+Paste this into Supabase → SQL Editor and run.
+It will create one Program + one Cohort and seed templates/locations.
+
+begin;
+
+-- Clean previous seed (optional)
+delete from public.locations where program_id in (select id from public.programs where name = 'Solo Leveling: Houston Agent');
+delete from public.quest_templates where program_id in (select id from public.programs where name = 'Solo Leveling: Houston Agent');
+delete from public.cohorts where program_id in (select id from public.programs where name = 'Solo Leveling: Houston Agent');
+delete from public.programs where name = 'Solo Leveling: Houston Agent';
+
+-- Create Program + Cohort
+with p as (
+  insert into public.programs (name, description, city)
+  values (
+    'Solo Leveling: Houston Agent',
+    '12-month gamified fitness + real estate pipeline program (Greater Houston zones: EaDo, Humble/Atascocita, Kingwood, Summerwood).',
+    'Greater Houston'
+  )
+  returning id
+),
+c as (
+  insert into public.cohorts (program_id, name, starts_on, ends_on, is_active)
+  select p.id, 'Houston S1 2026', date '2026-01-27', date '2027-01-26', true
+  from p
+  returning id, program_id
+)
+
+-- Quest Templates
+insert into public.quest_templates
+(program_id, quest_type, title, description, xp_reward, stat_rewards, required_inputs, min_rank, active)
+select
+  c.program_id,
+  qt.quest_type::public.quest_type,
+  qt.title,
+  qt.description,
+  qt.xp_reward,
+  qt.stat_rewards::jsonb,
+  qt.required_inputs::jsonb,
+  qt.min_rank::public.rank_t,
+  true
+from c
+cross join (values
+  -- Mandatory (the 4 pillars)
+  ('mandatory','MOVE: 7,000+ steps','Walk in your zone. Minimum 7k steps. Optional: split into 2 sessions.','5','{"sta":1}','{"steps":"number"}','E'),
+  ('mandatory','TRAIN: Strength Session','15–25 min strength. Focus on consistency + joints safe.','5','{"str":1,"sta":1}','{"workout_done":"boolean"}','E'),
+  ('mandatory','HUNT: Prospecting Block','60–120 min outreach + follow-up.','5','{"cha":1}','{"calls":"number","texts":"number","convos":"number"}','E'),
+  ('mandatory','LEARN: 20 min Skill Study','Contracts, scripts, market intel, or MLS mastery.','5','{"int_stat":1}','{"learning_minutes":"number"}','E'),
+
+  -- Fitness (alternating)
+  ('fitness','E-Rank Full Body (A)','Incline pushups 3x8-12, Chair sit-stand 3x10-15, Row 3x10-12, Plank 3x20-40s.','10','{"str":1,"sta":1}','{}','E'),
+  ('fitness','E-Rank Cardio (B)','Brisk walk 25–35 min. Optional hill/stairs.','10','{"sta":1}','{}','E'),
+  ('fitness','Mobility (Daily)','Hips/ankles/shoulders 5–8 min.','5','{"agi":1}','{}','E'),
+
+  -- Business core quests
+  ('business','20 Calls','Make 20 calls (warm + cold).','10','{"cha":1}','{"calls":"number"}','E'),
+  ('business','40 Texts/DMs','Send 40 texts/DMs using your script.','10','{"cha":1}','{"texts":"number"}','E'),
+  ('business','5 Real Conversations','5 real conversations (phone/in-person).','10','{"cha":1}','{"convos":"number"}','E'),
+  ('business','1 Appointment Ask','Ask for the appointment (buyer consult, listing consult, showing).','15','{"cha":2,"rep":1}','{"appts":"number"}','E'),
+  ('business','Open House Raid','Attend/host an open house. Capture contacts + follow up same day.','20','{"rep":2,"cha":2}','{"convos":"number","leads":"number"}','E'),
+  ('business','Referral Ask x2','Ask 2 people: “Who do you know moving in 6–12 months?”','10','{"rep":1}','{}','E'),
+
+  -- Reputation / content
+  ('learning','Market Intel: Your Zone','Study today’s zone (prices, DOM, inventory, top subdivisions).','10','{"int_stat":2}','{}','E'),
+  ('business','Content Drop (Short)','Post 1 short video or 1 post with CTA.','10','{"rep":1}','{"content_done":"boolean"}','E'),
+
+  -- Location quest (check-in)
+  ('location','Dungeon Check-In','Visit a dungeon location in your zone and log a check-in.','10','{"rep":1}','{}','E')
+
+) as qt(quest_type,title,description,xp_reward,stat_rewards,required_inputs,min_rank);
+
+-- Locations ("Dungeons") - addresses are optional; lat/lng can be filled later
+with pid as (select id as program_id from public.programs where name='Solo Leveling: Houston Agent' limit 1)
+insert into public.locations (program_id, zone, name, category, address, lat, lng, suggested_mission)
+select pid.program_id, x.zone, x.name, x.category, x.address, null, null, x.mission
+from pid
+cross join (values
+  -- EaDo
+  ('EaDo','Buffalo Bayou Park','park','1800 Allen Pkwy, Houston, TX','Walk + 5 micro-convos + 1 video'),
+  ('EaDo','Discovery Green','park','1500 McKinney St, Houston, TX','Walk loop + 5 micro-convos'),
+  ('EaDo','EaDo Coffee Spot (rotation)','coffee','EaDo, Houston, TX','Sit 20 min + introduce yourself to 3 people'),
+  ('EaDo','Truck Yard / Social Hub (rotation)','networking','EaDo, Houston, TX','2 convos + 10 DMs after'),
+  ('EaDo','Downtown High-Rise Tour Zone','networking','Downtown/EaDo, Houston, TX','Talk to 2 leasing staff + note move-in specials'),
+
+  -- Humble/Atascocita
+  ('Humble/Atascocita','Lake Houston Park & Recreation Area','park','25840 FM 1485, New Caney, TX','Brisk walk + 5 convos'),
+  ('Humble/Atascocita','Atascocita retail plaza (rotation)','networking','Atascocita, TX','5 micro-convos + 20 follow-ups'),
+  ('Humble/Atascocita','Humble downtown strip','networking','Humble, TX','Talk to 3 business owners'),
+  ('Humble/Atascocita','Local church/community board','community','Humble/Atascocita, TX','Find 1 community event to attend'),
+  ('Humble/Atascocita','New construction drive route','field','Atascocita/Humble, TX','Record 1 “new build update” video'),
+
+  -- Kingwood
+  ('Kingwood','Kingwood Greenbelt Trails','park','Kingwood, TX','Steps + 5 micro-convos'),
+  ('Kingwood','Kingwood Town Center','networking','Kingwood Dr, Kingwood, TX','3 convos + 10 DMs'),
+  ('Kingwood','Local coffee shop (rotation)','coffee','Kingwood, TX','Talk to 2 regulars + ask relocation questions'),
+  ('Kingwood','Neighborhood turnover scan','field','Kingwood, TX','Spot 10 turnover signals (dumpsters, remodels, for rent)'),
+  ('Kingwood','Open house circuit (weekends)','open-house','Kingwood, TX','10 convos + 10 contacts'),
+
+  -- Summerwood
+  ('Summerwood','Lake Houston area walk route','park','Summerwood, Houston, TX','45-min walk + 5 micro-convos'),
+  ('Summerwood','Grocery corridor (rotation)','networking','Summerwood, Houston, TX','5 micro-convos + 20 texts'),
+  ('Summerwood','HOA/common area event','community','Summerwood, Houston, TX','Locate HOA/community calendar'),
+  ('Summerwood','New construction + builders (route)','field','Summerwood, Houston, TX','Talk to 1 builder rep + collect brochure'),
+  ('Summerwood','Open house raid (weekends)','open-house','Summerwood, Houston, TX','10 convos + follow-up block')
+) as x(zone,name,category,address,mission);
+
+commit;
+
+
+⸻
+
+2) Next.js Multi-Agent Folder Structure (MVP)
+
+solo-agent-tracker/
+  app/
+    (auth)/
+      login/page.tsx
+    dashboard/page.tsx
+    today/page.tsx
+    log/page.tsx
+    map/page.tsx
+    boss/page.tsx
+    shop/page.tsx
+    api/
+      log/route.ts
+      generate-daily/route.ts
+  lib/
+    supabaseClient.ts
+    supabaseAdmin.ts
+    ranks.ts
+    engine.ts
+    auth.ts
+  components/
+    HudCard.tsx
+    QuestList.tsx
+    StatBar.tsx
+    ZonePicker.tsx
+  vercel.json
+  .env.local
+
+
+⸻
+
+3) Shared Logic Files
+
+lib/ranks.ts
+
+export const RANKS = [
+  { rank: "E", minXp: 0 },
+  { rank: "D", minXp: 500 },
+  { rank: "C", minXp: 1500 },
+  { rank: "B", minXp: 3000 },
+  { rank: "A", minXp: 5000 },
+  { rank: "S", minXp: 7500 },
+] as const;
+
+export type Rank = (typeof RANKS)[number]["rank"];
+
+export function computeRank(xp: number): Rank {
+  let current: Rank = "E";
+  for (const r of RANKS) if (xp >= r.minXp) current = r.rank;
+  return current;
+}
+
+lib/engine.ts
+
+type StatKey = "str"|"sta"|"agi"|"int_stat"|"cha"|"rep"|"gold";
+
+export function xpFromLog(log: {
+  workout_done: boolean;
+  steps: number;
+  convos: number;
+  appts: number;
+  content_done: boolean;
+  learning_minutes: number;
+}) {
+  // Mandatory proxies:
+  const mandatoryCount =
+    (log.steps >= 7000 ? 1 : 0) +
+    (log.workout_done ? 1 : 0) +
+    ((log.convos >= 5 || log.appts >= 1) ? 1 : 0) +
+    (log.learning_minutes >= 20 ? 1 : 0);
+
+  let xp = mandatoryCount * 5; // up to +20/day
+  if (log.workout_done) xp += 10;
+  if (log.steps >= 10000) xp += 5;
+  if (log.convos >= 5) xp += 10;
+  if (log.appts >= 1) xp += 15;
+  if (log.content_done) xp += 10;
+  return xp;
+}
+
+export function statGainsFromLog(log: {
+  workout_done: boolean;
+  steps: number;
+  learning_minutes: number;
+  convos: number;
+  appts: number;
+  content_done: boolean;
+}) {
+  const gains: Partial<Record<StatKey, number>> = {};
+
+  if (log.workout_done) { gains.str = (gains.str ?? 0) + 1; gains.sta = (gains.sta ?? 0) + 1; }
+  if (log.steps >= 10000) gains.sta = (gains.sta ?? 0) + 1;
+  if (log.learning_minutes >= 20) gains.int_stat = (gains.int_stat ?? 0) + 1;
+  if (log.convos >= 5) gains.cha = (gains.cha ?? 0) + 1;
+  if (log.appts >= 1) { gains.cha = (gains.cha ?? 0) + 2; gains.rep = (gains.rep ?? 0) + 1; }
+  if (log.content_done) gains.rep = (gains.rep ?? 0) + 1;
+
+  return gains;
+}
+
+
+⸻
+
+4) Supabase Admin Client (Server Only)
+
+lib/supabaseAdmin.ts
+
+import { createClient } from "@supabase/supabase-js";
+
+export const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } }
+);
+
+
+⸻
+
+5) API Route: Log Today → Update Member Stats (multi-agent)
+
+app/api/log/route.ts
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { xpFromLog, statGainsFromLog } from "@/lib/engine";
+import { computeRank } from "@/lib/ranks";
+
+export async function POST(req: Request) {
+  const body = await req.json();
+
+  const {
+    userId,
+    cohortId,
+    logDate,
+    steps = 0,
+    workout_done = false,
+    calls = 0,
+    texts = 0,
+    convos = 0,
+    leads = 0,
+    appts = 0,
+    content_done = false,
+    learning_minutes = 0,
+    notes = ""
+  } = body;
+
+  if (!userId || !cohortId || !logDate) {
+    return NextResponse.json({ error: "Missing userId, cohortId, or logDate" }, { status: 400 });
+  }
+
+  // 1) Upsert daily log
+  const { error: logErr } = await supabaseAdmin
+    .from("daily_logs")
+    .upsert(
+      {
+        user_id: userId,
+        cohort_id: cohortId,
+        log_date: logDate,
+        steps,
+        workout_done,
+        calls,
+        texts,
+        convos,
+        leads,
+        appts,
+        content_done,
+        learning_minutes,
+        notes
+      },
+      { onConflict: "user_id,cohort_id,log_date" }
+    );
+
+  if (logErr) return NextResponse.json({ error: logErr.message }, { status: 400 });
+
+  // 2) Fetch member stats
+  const { data: statsRow, error: sErr } = await supabaseAdmin
+    .from("member_stats")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("cohort_id", cohortId)
+    .single();
+
+  if (sErr) return NextResponse.json({ error: sErr.message }, { status: 400 });
+
+  // 3) Compute xp + gains
+  const xpGain = xpFromLog({ workout_done, steps, convos, appts, content_done, learning_minutes });
+  const gains = statGainsFromLog({ workout_done, steps, learning_minutes, convos, appts, content_done });
+
+  const newXp = (statsRow.xp ?? 0) + xpGain;
+  const newRank = computeRank(newXp);
+
+  // Streak logic: 3/4 mandatory proxies = streak continues
+  const mandatoryCount =
+    (steps >= 7000 ? 1 : 0) +
+    (workout_done ? 1 : 0) +
+    ((convos >= 5 || appts >= 1) ? 1 : 0) +
+    (learning_minutes >= 20 ? 1 : 0);
+
+  const newStreak = mandatoryCount >= 3 ? (statsRow.streak + 1) : 0;
+
+  const updated = {
+    xp: newXp,
+    rank: newRank,
+    streak: newStreak,
+    str: statsRow.str + (gains.str ?? 0),
+    sta: statsRow.sta + (gains.sta ?? 0),
+    agi: statsRow.agi + (gains.agi ?? 0),
+    int_stat: statsRow.int_stat + (gains.int_stat ?? 0),
+    cha: statsRow.cha + (gains.cha ?? 0),
+    rep: statsRow.rep + (gains.rep ?? 0),
+    gold: statsRow.gold + (gains.gold ?? 0),
+    updated_at: new Date().toISOString()
+  };
+
+  const { error: upErr } = await supabaseAdmin
+    .from("member_stats")
+    .update(updated)
+    .eq("user_id", userId)
+    .eq("cohort_id", cohortId);
+
+  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
+
+  return NextResponse.json({ ok: true, xpGain, gains, updated });
+}
+
+
+⸻
+
+6) API Route: Generate Daily Quests (Cron-safe, multi-agent)
+
+What it does
+	•	Finds the active cohort(s)
+	•	Finds all members with role agent
+	•	Inserts a “standard daily pack”:
+	•	Mandatory: MOVE / TRAIN / HUNT / LEARN
+	•	Fitness: alternates A/B + mobility
+	•	Business: calls/texts/convos + appointment ask
+	•	Location: dungeon check-in
+
+app/api/generate-daily/route.ts
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+function isoDate(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+
+export async function POST() {
+  const today = new Date();
+  const questDate = isoDate(today);
+
+  // 1) Get active cohort + program
+  const { data: cohorts, error: cErr } = await supabaseAdmin
+    .from("cohorts")
+    .select("id, program_id")
+    .eq("is_active", true);
+
+  if (cErr) return NextResponse.json({ error: cErr.message }, { status: 400 });
+
+  let created = 0;
+
+  for (const cohort of cohorts ?? []) {
+    // 2) Members in cohort
+    const { data: members, error: mErr } = await supabaseAdmin
+      .from("cohort_memberships")
+      .select("user_id, role")
+      .eq("cohort_id", cohort.id)
+      .eq("role", "agent");
+
+    if (mErr) return NextResponse.json({ error: mErr.message }, { status: 400 });
+
+    // 3) Load templates for this program
+    const { data: templates, error: tErr } = await supabaseAdmin
+      .from("quest_templates")
+      .select("id, quest_type, title, description, xp_reward, stat_rewards, required_inputs, min_rank, active")
+      .eq("program_id", cohort.program_id)
+      .eq("active", true);
+
+    if (tErr) return NextResponse.json({ error: tErr.message }, { status: 400 });
+
+    const byTitle = new Map((templates ?? []).map(t => [t.title, t]));
+
+    const packTitles = [
+      // Mandatory
+      "MOVE: 7,000+ steps",
+      "TRAIN: Strength Session",
+      "HUNT: Prospecting Block",
+      "LEARN: 20 min Skill Study",
+      // Fitness rotation
+      (today.getDay() % 2 === 0) ? "E-Rank Full Body (A)" : "E-Rank Cardio (B)",
+      "Mobility (Daily)",
+      // Business
+      "20 Calls",
+      "40 Texts/DMs",
+      "5 Real Conversations",
+      "1 Appointment Ask",
+      // Location
+      "Dungeon Check-In",
+      // Optional: rep/learning booster
+      "Market Intel: Your Zone",
+      "Content Drop (Short)"
+    ];
+
+    for (const member of members ?? []) {
+      // Insert quests (ignore duplicates)
+      const inserts = packTitles
+        .map(title => byTitle.get(title))
+        .filter(Boolean)
+        .map(t => ({
+          user_id: member.user_id,
+          cohort_id: cohort.id,
+          quest_date: questDate,
+          template_id: t!.id,
+          title: t!.title,
+          description: t!.description,
+          quest_type: t!.quest_type,
+          xp_reward: t!.xp_reward,
+          stat_rewards: t!.stat_rewards,
+          required_inputs: t!.required_inputs
+        }));
+
+      if (inserts.length) {
+        const { error: iErr } = await supabaseAdmin
+          .from("daily_quests")
+          .upsert(inserts, { onConflict: "user_id,cohort_id,quest_date,title" });
+
+        if (iErr) return NextResponse.json({ error: iErr.message }, { status: 400 });
+        created += inserts.length;
+      }
+    }
+  }
+
+  return NextResponse.json({ ok: true, questDate, created });
+}
+
+
+⸻
+
+7) Vercel Cron (runs daily quest generation automatically)
+
+Create vercel.json:
+
+{
+  "crons": [
+    {
+      "path": "/api/generate-daily",
+      "schedule": "0 7 * * *"
+    }
+  ]
+}
+
+Cron hits the route as a GET by default; easiest fix: also export GET in that route that calls the same logic, or change it to GET.
+
+If you want it as GET, here’s the quick add:
+
+export async function GET() {
+  return POST();
+}
+
+
+⸻
+
+8) Next step: seed a “Cohort join” + auto-init stats
+
+When a user joins a cohort, you should create a member_stats row if missing (E-Rank defaults). If you want, I’ll paste the exact /api/join-cohort route + a simple invite-code table so you can onboard paid users cleanly.
+
+Say the word and tell me whether you want:
+	•	open cohorts (anyone can join), or
+	•	invite code only (recommended for selling).

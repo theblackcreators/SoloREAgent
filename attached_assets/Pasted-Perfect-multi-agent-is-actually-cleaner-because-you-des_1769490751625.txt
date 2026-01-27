@@ -1,0 +1,258 @@
+Perfect — multi-agent is actually cleaner, because you design everything as Program → Cohort → Users, with strict row-level security.
+
+Below is the multi-agent version of Option B: schema upgrades, RLS, and how to structure “Solo Leveling Agent” so you can later sell it as a subscription.
+
+⸻
+
+1) Multi-agent architecture (3 layers)
+
+A) Program (template)
+
+A reusable “game” definition:
+	•	rank thresholds, XP rules, quest templates, shop unlocks, dungeon locations
+
+B) Cohort (instance)
+
+A running season of the program:
+	•	start date, rules tweaks, city (Houston), weekly benchmarks
+
+C) Membership (user in cohort)
+
+Each agent’s private progress:
+	•	stats, streak, daily logs, quest instances
+
+This lets you run:
+	•	1 program → many cohorts → many users
+
+⸻
+
+2) Updated database schema (Supabase SQL)
+
+Add these tables on top of your MVP tables (or replace where noted).
+
+Programs + Cohorts + Memberships
+
+-- PROGRAMS (template: Solo Leveling Houston Agent)
+create table public.programs (
+  id bigserial primary key,
+  name text not null,
+  description text,
+  city text default 'Greater Houston',
+  created_at timestamptz default now()
+);
+
+-- COHORTS (running instance)
+create table public.cohorts (
+  id bigserial primary key,
+  program_id bigint not null references public.programs(id) on delete cascade,
+  name text not null,                  -- e.g. "Houston S1 2026"
+  starts_on date not null,
+  ends_on date not null,
+  is_active boolean default true,
+  created_at timestamptz default now()
+);
+
+-- MEMBERSHIP (user joins cohort)
+create type public.member_role as enum ('agent','coach','admin');
+
+create table public.cohort_memberships (
+  id bigserial primary key,
+  cohort_id bigint not null references public.cohorts(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  role public.member_role not null default 'agent',
+  joined_at timestamptz default now(),
+  unique(cohort_id, user_id)
+);
+
+Replace “stats” with cohort-scoped stats
+
+Instead of one stats row per user, you want one per user per cohort:
+
+drop table if exists public.stats;
+
+create table public.member_stats (
+  cohort_id bigint not null references public.cohorts(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  xp int not null default 0,
+  rank public.rank_t not null default 'E',
+  streak int not null default 0,
+  str int not null default 10,
+  sta int not null default 12,
+  agi int not null default 8,
+  int_stat int not null default 15,
+  cha int not null default 10,
+  rep int not null default 5,
+  gold int not null default 0,
+  updated_at timestamptz default now(),
+  primary key (cohort_id, user_id)
+);
+
+Make logs and daily quests cohort-scoped
+
+alter table public.daily_logs add column if not exists cohort_id bigint;
+alter table public.daily_quests add column if not exists cohort_id bigint;
+
+-- Ensure cohort_id is required going forward
+alter table public.daily_logs alter column cohort_id set not null;
+alter table public.daily_quests alter column cohort_id set not null;
+
+-- Update uniqueness to include cohort
+drop index if exists daily_logs_user_id_log_date_key;
+create unique index daily_logs_unique on public.daily_logs(user_id, cohort_id, log_date);
+
+drop index if exists daily_quests_user_id_quest_date_title_key;
+create unique index daily_quests_unique on public.daily_quests(user_id, cohort_id, quest_date, title);
+
+Quest templates should belong to a Program
+
+alter table public.quest_templates add column if not exists program_id bigint;
+alter table public.quest_templates
+  add constraint quest_templates_program_fk
+  foreign key (program_id) references public.programs(id) on delete cascade;
+
+Locations (“Dungeons”) should belong to a Program
+
+alter table public.locations add column if not exists program_id bigint;
+alter table public.locations
+  add constraint locations_program_fk
+  foreign key (program_id) references public.programs(id) on delete cascade;
+
+
+⸻
+
+3) RLS policies (multi-agent safe)
+
+Goal
+	•	Agents can only see/edit their own membership data
+	•	Coaches/Admins can see cohort members (for leaderboards/coaching)
+
+Enable RLS:
+
+alter table public.programs enable row level security;
+alter table public.cohorts enable row level security;
+alter table public.cohort_memberships enable row level security;
+alter table public.member_stats enable row level security;
+alter table public.daily_logs enable row level security;
+alter table public.daily_quests enable row level security;
+alter table public.location_checkins enable row level security;
+
+Policies:
+
+-- PROGRAMS: readable by anyone (or restrict later)
+create policy "programs_read" on public.programs
+for select using (true);
+
+-- COHORTS: readable by members only
+create policy "cohorts_read_members" on public.cohorts
+for select using (
+  exists (
+    select 1 from public.cohort_memberships m
+    where m.cohort_id = cohorts.id and m.user_id = auth.uid()
+  )
+);
+
+-- MEMBERSHIPS: user can read their own; coach/admin can read cohort
+create policy "membership_read_own_or_coach" on public.cohort_memberships
+for select using (
+  user_id = auth.uid()
+  or exists (
+    select 1 from public.cohort_memberships m2
+    where m2.cohort_id = cohort_memberships.cohort_id
+      and m2.user_id = auth.uid()
+      and m2.role in ('coach','admin')
+  )
+);
+
+-- MEMBER STATS: own or coach/admin of same cohort
+create policy "stats_read_own_or_coach" on public.member_stats
+for select using (
+  user_id = auth.uid()
+  or exists (
+    select 1 from public.cohort_memberships m
+    where m.cohort_id = member_stats.cohort_id
+      and m.user_id = auth.uid()
+      and m.role in ('coach','admin')
+  )
+);
+
+create policy "stats_update_own" on public.member_stats
+for update using (user_id = auth.uid());
+
+-- DAILY LOGS: own only (keep private)
+create policy "logs_rw_own" on public.daily_logs
+for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- DAILY QUESTS: own only
+create policy "quests_rw_own" on public.daily_quests
+for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- CHECKINS: own only
+create policy "checkins_rw_own" on public.location_checkins
+for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+✅ This setup allows leaderboards (coach/admin can read member_stats), while keeping logs/quest inputs private unless you choose otherwise.
+
+⸻
+
+4) Code changes you must make (important)
+
+Every query becomes cohort-scoped
+	•	Dashboard loads member_stats by (user_id, cohort_id)
+	•	Logs upsert includes cohort_id
+	•	Daily quests generation creates quests per (user_id, cohort_id, date)
+
+Your log API payload becomes:
+
+{ userId, cohortId, logDate, steps, calls, texts, convos, leads, appts, content_done, learning_minutes }
+
+And you update stats in member_stats not stats.
+
+⸻
+
+5) Onboarding flow (multi-agent)
+
+Minimal onboarding (MVP)
+	1.	User signs up
+	2.	Create profiles row
+	3.	User selects a cohort OR enters an invite code
+	4.	Insert into cohort_memberships
+	5.	Create initial member_stats row
+
+Add invite codes (optional but recommended)
+
+Create cohort_invites table with code + role + expiration.
+
+⸻
+
+6) Leaderboard (multi-agent feature)
+
+Because member_stats is cohort-scoped:
+	•	Weekly leaderboard = order by XP gained this week (you can compute from logs)
+	•	Overall leaderboard = order by xp desc
+
+You can also create badges/titles in a badges table later.
+
+⸻
+
+7) Monetization-ready (Stripe later)
+
+When you’re ready:
+	•	Gate access by checking if user has an active subscription for the cohort/program
+	•	Store stripe_customer_id in profiles
+	•	Store subscriptions table keyed to user_id (or cohort membership)
+
+⸻
+
+8) What I would build first (in order)
+	1.	Cohort selection + membership creation
+	2.	Cohort-scoped dashboard HUD
+	3.	Today log → updates member_stats
+	4.	Daily quest list per cohort
+	5.	Leaderboard page (read-only)
+	6.	Cron quest generator per cohort
+
+⸻
+
+If you want, I can now generate:
+	•	a seed script that inserts the Solo Leveling Houston program, quest templates, and starter “dungeons” for EaDo / Humble / Kingwood / Summerwood, plus
+	•	the updated Next.js folder structure and the revised /api/log route using member_stats.

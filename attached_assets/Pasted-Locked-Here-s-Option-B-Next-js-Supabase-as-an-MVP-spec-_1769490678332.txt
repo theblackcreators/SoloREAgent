@@ -1,0 +1,449 @@
+Locked. Here’s Option B (Next.js + Supabase) as an MVP spec + drop-in scaffold you can start building immediately.
+
+⸻
+
+0) Stack
+	•	Frontend: Next.js (App Router) + TypeScript + Tailwind
+	•	Backend/DB/Auth: Supabase (Postgres + Auth + RLS)
+	•	Maps: Mapbox (or Google Maps later)
+	•	Automations: Vercel Cron (generate daily quests) + optional Twilio SMS
+	•	Hosting: Vercel
+
+⸻
+
+1) MVP Screens (routes)
+	1.	/ → Landing / Login
+	2.	/dashboard → HUD (Rank, XP bar, Streak, Today’s Quests)
+	3.	/today → Quest checklist + input logging (steps/calls/etc.)
+	4.	/log → Calendar list of daily logs
+	5.	/map → “Houston Dungeons” map + “Visited” check-in
+	6.	/boss → Weekly score + benchmarks + rank trial status
+	7.	/shop → Loot unlocks (tools/resources by rank)
+
+⸻
+
+2) Core Game Logic (server-side)
+
+Daily loop
+	•	App shows “Today’s quests”
+	•	User checks off + enters numbers
+	•	System calculates:
+	•	XP gained
+	•	Stat changes (STR/STA/AGI/INT/CHA/REP/GOLD)
+	•	Streak changes
+	•	Rank changes + unlocks
+
+Weekly loop
+	•	Every Sunday night: compute weekly score and show “Boss Battle result”
+
+⸻
+
+3) Database Schema (Supabase SQL)
+
+Run this in Supabase SQL editor:
+
+-- 1) Profile
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  name text not null,
+  height_in int,
+  weight_lb int,
+  age int,
+  trec text,
+  boards text[],
+  zones text[],
+  created_at timestamptz default now()
+);
+
+-- 2) Stats (HUD)
+create type public.rank_t as enum ('E','D','C','B','A','S');
+
+create table public.stats (
+  user_id uuid primary key references public.profiles(id) on delete cascade,
+  xp int not null default 0,
+  rank public.rank_t not null default 'E',
+  streak int not null default 0,
+  str int not null default 10,
+  sta int not null default 12,
+  agi int not null default 8,
+  int_stat int not null default 15,
+  cha int not null default 10,
+  rep int not null default 5,
+  gold int not null default 0,
+  updated_at timestamptz default now()
+);
+
+-- 3) Quests (templates)
+create type public.quest_type as enum ('fitness','business','learning','location','mandatory');
+
+create table public.quest_templates (
+  id bigserial primary key,
+  quest_type public.quest_type not null,
+  title text not null,
+  description text,
+  xp_reward int not null default 0,
+  stat_rewards jsonb not null default '{}'::jsonb,
+  required_inputs jsonb not null default '{}'::jsonb,
+  min_rank public.rank_t not null default 'E',
+  active boolean not null default true
+);
+
+-- 4) Daily quests (instanced from templates)
+create table public.daily_quests (
+  id bigserial primary key,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  quest_date date not null,
+  template_id bigint references public.quest_templates(id),
+  title text not null,
+  description text,
+  quest_type public.quest_type not null,
+  xp_reward int not null default 0,
+  stat_rewards jsonb not null default '{}'::jsonb,
+  required_inputs jsonb not null default '{}'::jsonb,
+  completed boolean not null default false,
+  input_values jsonb not null default '{}'::jsonb,
+  completed_at timestamptz,
+  unique(user_id, quest_date, title)
+);
+
+-- 5) Daily logs (numeric tracker)
+create table public.daily_logs (
+  id bigserial primary key,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  log_date date not null,
+  steps int default 0,
+  workout_done boolean default false,
+  calls int default 0,
+  texts int default 0,
+  convos int default 0,
+  leads int default 0,
+  appts int default 0,
+  content_done boolean default false,
+  learning_minutes int default 0,
+  notes text,
+  created_at timestamptz default now(),
+  unique(user_id, log_date)
+);
+
+-- 6) Locations (“Dungeons”)
+create table public.locations (
+  id bigserial primary key,
+  zone text not null, -- EaDo, Humble/Atascocita, Kingwood, Summerwood
+  name text not null,
+  category text not null, -- park, coffee, networking, open-house, etc.
+  address text,
+  lat double precision,
+  lng double precision,
+  suggested_mission text
+);
+
+create table public.location_checkins (
+  id bigserial primary key,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  location_id bigint not null references public.locations(id) on delete cascade,
+  checkin_date date not null,
+  notes text,
+  unique(user_id, location_id, checkin_date)
+);
+
+
+⸻
+
+4) Security (RLS Policies)
+
+Turn on RLS and add these:
+
+alter table public.profiles enable row level security;
+alter table public.stats enable row level security;
+alter table public.daily_quests enable row level security;
+alter table public.daily_logs enable row level security;
+alter table public.location_checkins enable row level security;
+
+-- Profiles
+create policy "profiles_select_own" on public.profiles
+for select using (auth.uid() = id);
+create policy "profiles_update_own" on public.profiles
+for update using (auth.uid() = id);
+
+-- Stats
+create policy "stats_select_own" on public.stats
+for select using (auth.uid() = user_id);
+create policy "stats_update_own" on public.stats
+for update using (auth.uid() = user_id);
+
+-- Daily quests
+create policy "daily_quests_select_own" on public.daily_quests
+for select using (auth.uid() = user_id);
+create policy "daily_quests_update_own" on public.daily_quests
+for update using (auth.uid() = user_id);
+create policy "daily_quests_insert_own" on public.daily_quests
+for insert with check (auth.uid() = user_id);
+
+-- Daily logs
+create policy "daily_logs_select_own" on public.daily_logs
+for select using (auth.uid() = user_id);
+create policy "daily_logs_upsert_own" on public.daily_logs
+for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Checkins
+create policy "checkins_select_own" on public.location_checkins
+for select using (auth.uid() = user_id);
+create policy "checkins_write_own" on public.location_checkins
+for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+(Locations table can stay public read if you want; don’t enable RLS on it unless needed.)
+
+⸻
+
+5) Rank Thresholds (server constant)
+
+Use this in your server logic:
+
+export const RANKS = [
+  { rank: "E", minXp: 0 },
+  { rank: "D", minXp: 500 },
+  { rank: "C", minXp: 1500 },
+  { rank: "B", minXp: 3000 },
+  { rank: "A", minXp: 5000 },
+  { rank: "S", minXp: 7500 },
+] as const;
+
+export function computeRank(xp: number) {
+  let current = "E";
+  for (const r of RANKS) if (xp >= r.minXp) current = r.rank;
+  return current;
+}
+
+
+⸻
+
+6) XP + Stat Engine (the “Solo Leveling math”)
+
+Put this in a shared file lib/engine.ts:
+
+type StatKey = "str"|"sta"|"agi"|"int_stat"|"cha"|"rep"|"gold";
+
+export function xpFromLog(log: {
+  workout_done: boolean;
+  steps: number;
+  convos: number;
+  appts: number;
+  content_done: boolean;
+  learning_minutes: number;
+}) {
+  let xp = 0;
+
+  // Mandatory quest completion proxies:
+  // Move: steps >= 7000
+  // Train: workout_done
+  // Hunt: convos >= 5 OR appts >= 1
+  // Learn: learning_minutes >= 20
+  const mandatory = [
+    log.steps >= 7000,
+    log.workout_done,
+    (log.convos >= 5 || log.appts >= 1),
+    log.learning_minutes >= 20,
+  ].filter(Boolean).length;
+
+  xp += mandatory * 5;      // up to +20/day
+  if (log.workout_done) xp += 10;
+  if (log.steps >= 10000) xp += 5;
+  if (log.convos >= 5) xp += 10;
+  if (log.appts >= 1) xp += 15;
+  if (log.content_done) xp += 10;
+
+  return xp;
+}
+
+export function statGainsFromLog(log: {
+  workout_done: boolean;
+  steps: number;
+  learning_minutes: number;
+  convos: number;
+  appts: number;
+  content_done: boolean;
+}) {
+  const gains: Partial<Record<StatKey, number>> = {};
+
+  if (log.workout_done) { gains.str = (gains.str ?? 0) + 1; gains.sta = (gains.sta ?? 0) + 1; }
+  if (log.steps >= 10000) gains.sta = (gains.sta ?? 0) + 1;
+  if (log.learning_minutes >= 20) gains.int_stat = (gains.int_stat ?? 0) + 1;
+  if (log.convos >= 5) gains.cha = (gains.cha ?? 0) + 1;
+  if (log.appts >= 1) { gains.cha = (gains.cha ?? 0) + 2; gains.rep = (gains.rep ?? 0) + 1; }
+
+  // Content can optionally boost REP
+  if (log.content_done) gains.rep = (gains.rep ?? 0) + 1;
+
+  return gains;
+}
+
+
+⸻
+
+7) Quest Generation (Daily)
+
+MVP approach (simple)
+
+Instead of generating 365 unique quests immediately:
+	•	Store quest templates
+	•	Each morning, create 6–8 daily quests for the user:
+	•	4 mandatory (Move/Train/Hunt/Learn)
+	•	2–3 business missions (calls/texts/open house/outreach)
+	•	1 location mission (a “Dungeon” in one of your zones)
+
+Implementation
+
+Create an API route /api/generate-daily called by Vercel Cron at 7:00 AM.
+
+Cron schedule example (Vercel): 0 7 * * * (America/Chicago handled in code)
+
+⸻
+
+8) Next.js Project Scaffold (commands + env)
+
+Create app
+
+npx create-next-app@latest solo-agent-tracker --ts --app
+cd solo-agent-tracker
+npm i @supabase/supabase-js
+npm i -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+
+.env.local
+
+NEXT_PUBLIC_SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...   # server only
+MAPBOX_TOKEN=...
+
+Supabase client
+
+lib/supabaseClient.ts
+
+import { createClient } from "@supabase/supabase-js";
+
+export const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+Server client (service role) for cron/admin:
+lib/supabaseAdmin.ts
+
+import { createClient } from "@supabase/supabase-js";
+
+export const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } }
+);
+
+
+⸻
+
+9) The key MVP interaction: “Log Today” → updates Stats
+
+API route: /app/api/log/route.ts
+
+This receives today’s numbers, upserts daily_logs, calculates XP/gains, updates stats.
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { xpFromLog, statGainsFromLog } from "@/lib/engine";
+import { computeRank } from "@/lib/ranks";
+
+export async function POST(req: Request) {
+  const body = await req.json();
+  const { userId, logDate, ...log } = body;
+
+  // 1) Upsert daily log
+  const { error: logErr } = await supabaseAdmin
+    .from("daily_logs")
+    .upsert({ user_id: userId, log_date: logDate, ...log }, { onConflict: "user_id,log_date" });
+
+  if (logErr) return NextResponse.json({ error: logErr.message }, { status: 400 });
+
+  // 2) Fetch current stats
+  const { data: statsRow, error: sErr } = await supabaseAdmin
+    .from("stats")
+    .select("*")
+    .eq("user_id", userId)
+    .single();
+
+  if (sErr) return NextResponse.json({ error: sErr.message }, { status: 400 });
+
+  // 3) Compute xp + stat gains
+  const xpGain = xpFromLog(log);
+  const gains = statGainsFromLog(log);
+
+  const newXp = (statsRow.xp ?? 0) + xpGain;
+  const newRank = computeRank(newXp);
+
+  // Streak: if the user hit at least 3/4 mandatory proxies today
+  const mandatoryCount =
+    (log.steps >= 7000 ? 1 : 0) +
+    (log.workout_done ? 1 : 0) +
+    ((log.convos >= 5 || log.appts >= 1) ? 1 : 0) +
+    (log.learning_minutes >= 20 ? 1 : 0);
+
+  const streak = mandatoryCount >= 3 ? (statsRow.streak + 1) : 0;
+
+  const updated = {
+    xp: newXp,
+    rank: newRank,
+    streak,
+    str: statsRow.str + (gains.str ?? 0),
+    sta: statsRow.sta + (gains.sta ?? 0),
+    agi: statsRow.agi + (gains.agi ?? 0),
+    int_stat: statsRow.int_stat + (gains.int_stat ?? 0),
+    cha: statsRow.cha + (gains.cha ?? 0),
+    rep: statsRow.rep + (gains.rep ?? 0),
+    gold: statsRow.gold + (gains.gold ?? 0),
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error: upErr } = await supabaseAdmin
+    .from("stats")
+    .update(updated)
+    .eq("user_id", userId);
+
+  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
+
+  return NextResponse.json({ ok: true, xpGain, gains, updated });
+}
+
+
+⸻
+
+10) Houston “Dungeon Map”
+
+MVP: show pins from locations filtered by your zones; allow “Check-in”.
+	•	/map loads locations
+	•	“Check-in” button inserts into location_checkins
+	•	Add a “Visited Today” quest completion automatically
+
+⸻
+
+11) What I recommend you build first (fastest path)
+
+Week 1 build:
+	1.	Auth + Profile + Stats table init
+	2.	Dashboard HUD
+	3.	Today log form → API updates stats
+	4.	Daily quest list (static templates)
+	5.	Streak + rank + weekly score display
+
+Week 2 build:
+6) Dungeon map + check-ins
+7) Vercel cron daily quest generation
+8) Loot shop unlocks by rank
+
+⸻
+
+Quick question (so I generate the exact starter repo structure)
+
+Do you want this to be:
+	•	Single-player only (just you), or
+	•	Multi-agent (so you can sell it later / multiple users)?
+
+Either way works — but it changes a couple table/policy details.

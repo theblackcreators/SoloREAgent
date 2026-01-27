@@ -1,0 +1,566 @@
+Below are drop-in UI pages for a Next.js (App Router) + Tailwind + Supabase MVP named:
+
+SoloREAgent Leveling System
+
+I’m including the pages plus the two small admin API routes they need to function (list cohorts + list invites).
+
+⸻
+
+1) Browser Supabase client (required)
+
+lib/supabaseClient.ts
+
+import { createClient } from "@supabase/supabase-js";
+
+export const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+
+⸻
+
+2) Join page (invite-code only)
+
+app/join/page.tsx
+
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { supabase } from "@/lib/supabaseClient";
+
+export default function JoinPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const codeFromUrl = useMemo(() => (searchParams.get("code") || "").trim(), [searchParams]);
+
+  const [code, setCode] = useState(codeFromUrl);
+  const [status, setStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
+  const [msg, setMsg] = useState<string>("");
+
+  useEffect(() => {
+    if (codeFromUrl) setCode(codeFromUrl);
+  }, [codeFromUrl]);
+
+  async function handleJoin() {
+    setStatus("loading");
+    setMsg("");
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
+
+    if (!token) {
+      setStatus("error");
+      setMsg("Please log in first.");
+      router.push("/login");
+      return;
+    }
+
+    const res = await fetch("/api/join", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        code: code.trim(),
+        // Optional profile fields (you can expand this later):
+        // profile: { name: "Eldon Peterson", height_in: 72, weight_lb: 260, age: 43, trec: "675220", boards: ["HAR","BBOR"], zones: ["EaDo","Humble/Atascocita","Kingwood","Summerwood"] }
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus("error");
+      setMsg(data?.error || "Join failed.");
+      return;
+    }
+
+    setStatus("ok");
+    setMsg("Welcome, Hunter. You have entered the cohort.");
+    // Store last cohort for convenience (optional)
+    if (data?.cohortId) localStorage.setItem("sra_last_cohort_id", String(data.cohortId));
+    router.push("/dashboard");
+  }
+
+  return (
+    <main className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto max-w-xl px-6 py-14">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-8">
+          <div className="flex items-center justify-between gap-4">
+            <h1 className="text-2xl font-semibold tracking-tight">
+              SoloREAgent Leveling System
+            </h1>
+            <span className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-xs text-zinc-300">
+              Invite Only
+            </span>
+          </div>
+
+          <p className="mt-3 text-sm text-zinc-300">
+            Enter your invite code to join a cohort. Your stats, quests, and rank will initialize automatically.
+          </p>
+
+          <div className="mt-6">
+            <label className="text-xs text-zinc-400">Invite Code</label>
+            <input
+              value={code}
+              onChange={(e) => setCode(e.target.value.toUpperCase())}
+              placeholder="EX: HOUSTON-S1-XXXX"
+              className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm outline-none focus:border-zinc-600"
+            />
+          </div>
+
+          <button
+            onClick={handleJoin}
+            disabled={!code.trim() || status === "loading"}
+            className="mt-5 w-full rounded-xl bg-zinc-100 px-4 py-3 text-sm font-semibold text-zinc-950 disabled:opacity-50"
+          >
+            {status === "loading" ? "Entering Gate..." : "Join Cohort"}
+          </button>
+
+          {msg ? (
+            <div
+              className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
+                status === "error"
+                  ? "border-red-900/60 bg-red-950/30 text-red-200"
+                  : "border-emerald-900/60 bg-emerald-950/30 text-emerald-200"
+              }`}
+            >
+              {msg}
+            </div>
+          ) : null}
+
+          <div className="mt-6 text-xs text-zinc-400">
+            Tip: You can share invite links like{" "}
+            <span className="rounded bg-zinc-950 px-2 py-1 text-zinc-200">
+              /join?code=YOURCODE
+            </span>
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+
+⸻
+
+3) Admin Invites page (create + list invites)
+
+This page:
+	•	loads cohorts where the current user is admin
+	•	lets you create invite codes
+	•	lists existing invites for that cohort
+
+app/admin/invites/page.tsx
+
+"use client";
+
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+type Cohort = { id: number; name: string };
+type Invite = {
+  id: number;
+  code: string;
+  role: "agent" | "coach" | "admin";
+  max_uses: number;
+  uses: number;
+  is_active: boolean;
+  expires_at: string | null;
+  created_at: string;
+};
+
+export default function AdminInvitesPage() {
+  const [loading, setLoading] = useState(true);
+  const [cohorts, setCohorts] = useState<Cohort[]>([]);
+  const [cohortId, setCohortId] = useState<number | null>(null);
+
+  const [invites, setInvites] = useState<Invite[]>([]);
+  const [role, setRole] = useState<"agent" | "coach" | "admin">("agent");
+  const [maxUses, setMaxUses] = useState<number>(1);
+  const [expiresAt, setExpiresAt] = useState<string>("");
+
+  const [msg, setMsg] = useState<string>("");
+
+  async function getToken() {
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
+  }
+
+  async function loadMyCohorts() {
+    setLoading(true);
+    setMsg("");
+
+    const token = await getToken();
+    if (!token) {
+      setMsg("Please log in.");
+      setLoading(false);
+      return;
+    }
+
+    const res = await fetch("/api/admin/my-cohorts", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      setMsg(data?.error || "Failed to load cohorts.");
+      setLoading(false);
+      return;
+    }
+
+    setCohorts(data.cohorts || []);
+    const saved = Number(localStorage.getItem("sra_last_cohort_id") || "");
+    const first = data.cohorts?.[0]?.id;
+
+    const chosen = saved && data.cohorts?.some((c: Cohort) => c.id === saved) ? saved : first;
+    setCohortId(chosen || null);
+
+    setLoading(false);
+  }
+
+  async function loadInvites(targetCohortId: number) {
+    setMsg("");
+    const token = await getToken();
+    if (!token) return;
+
+    const res = await fetch(`/api/admin/list-invites?cohortId=${targetCohortId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      setMsg(data?.error || "Failed to load invites.");
+      return;
+    }
+
+    setInvites(data.invites || []);
+  }
+
+  async function createInvite() {
+    setMsg("");
+    const token = await getToken();
+    if (!token) {
+      setMsg("Please log in.");
+      return;
+    }
+    if (!cohortId) {
+      setMsg("Select a cohort first.");
+      return;
+    }
+
+    const res = await fetch("/api/admin/create-invite", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        cohortId,
+        role,
+        maxUses,
+        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      setMsg(data?.error || "Failed to create invite.");
+      return;
+    }
+
+    setMsg(`Invite created: ${data.invite.code}`);
+    await loadInvites(cohortId);
+  }
+
+  useEffect(() => {
+    loadMyCohorts();
+  }, []);
+
+  useEffect(() => {
+    if (cohortId) {
+      localStorage.setItem("sra_last_cohort_id", String(cohortId));
+      loadInvites(cohortId);
+    }
+  }, [cohortId]);
+
+  return (
+    <main className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto max-w-5xl px-6 py-14">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Admin — Invites</h1>
+            <p className="mt-1 text-sm text-zinc-300">
+              Create invite codes and onboard agents into the SoloREAgent Leveling System.
+            </p>
+          </div>
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 text-sm text-zinc-300">
+            Invite-only cohorts
+          </div>
+        </div>
+
+        <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
+          {/* Left: Controls */}
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 lg:col-span-1">
+            <h2 className="text-sm font-semibold text-zinc-200">Cohort</h2>
+
+            <div className="mt-3">
+              <label className="text-xs text-zinc-400">Select cohort</label>
+              <select
+                value={cohortId ?? ""}
+                onChange={(e) => setCohortId(Number(e.target.value))}
+                className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-sm outline-none focus:border-zinc-600"
+                disabled={loading}
+              >
+                <option value="" disabled>
+                  {loading ? "Loading..." : "Select"}
+                </option>
+                {cohorts.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} (#{c.id})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mt-6 border-t border-zinc-800 pt-6">
+              <h2 className="text-sm font-semibold text-zinc-200">Create Invite</h2>
+
+              <div className="mt-3 grid gap-3">
+                <div>
+                  <label className="text-xs text-zinc-400">Role</label>
+                  <select
+                    value={role}
+                    onChange={(e) => setRole(e.target.value as any)}
+                    className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-sm outline-none focus:border-zinc-600"
+                  >
+                    <option value="agent">agent</option>
+                    <option value="coach">coach</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs text-zinc-400">Max uses</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={maxUses}
+                    onChange={(e) => setMaxUses(Number(e.target.value))}
+                    className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm outline-none focus:border-zinc-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs text-zinc-400">Expires (optional)</label>
+                  <input
+                    type="datetime-local"
+                    value={expiresAt}
+                    onChange={(e) => setExpiresAt(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm outline-none focus:border-zinc-600"
+                  />
+                </div>
+
+                <button
+                  onClick={createInvite}
+                  disabled={!cohortId}
+                  className="mt-1 w-full rounded-xl bg-zinc-100 px-4 py-3 text-sm font-semibold text-zinc-950 disabled:opacity-50"
+                >
+                  Generate Invite Code
+                </button>
+
+                {msg ? (
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm text-zinc-200">
+                    {msg}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </section>
+
+          {/* Right: Invite list */}
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 lg:col-span-2">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-zinc-200">Invites</h2>
+              <button
+                onClick={() => cohortId && loadInvites(cohortId)}
+                className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200"
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-zinc-950 text-zinc-300">
+                  <tr>
+                    <th className="px-4 py-3">Code</th>
+                    <th className="px-4 py-3">Role</th>
+                    <th className="px-4 py-3">Uses</th>
+                    <th className="px-4 py-3">Expires</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Link</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800">
+                  {invites.length === 0 ? (
+                    <tr>
+                      <td className="px-4 py-4 text-zinc-400" colSpan={6}>
+                        No invites yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    invites.map((i) => (
+                      <tr key={i.id} className="bg-zinc-900/20">
+                        <td className="px-4 py-3 font-mono text-xs">{i.code}</td>
+                        <td className="px-4 py-3">{i.role}</td>
+                        <td className="px-4 py-3">
+                          {i.uses}/{i.max_uses}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-zinc-300">
+                          {i.expires_at ? new Date(i.expires_at).toLocaleString() : "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`rounded-full px-2 py-1 text-xs ${
+                              i.is_active ? "bg-emerald-950/50 text-emerald-200" : "bg-zinc-950 text-zinc-300"
+                            }`}
+                          >
+                            {i.is_active ? "active" : "inactive"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs"
+                            onClick={() => {
+                              const link = `${window.location.origin}/join?code=${encodeURIComponent(i.code)}`;
+                              navigator.clipboard.writeText(link);
+                            }}
+                          >
+                            Copy
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <p className="mt-4 text-xs text-zinc-400">
+              “Copy” creates a shareable join link like <span className="font-mono">/join?code=XXXX</span>.
+            </p>
+          </section>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+
+⸻
+
+4) API route: list cohorts where user is admin
+
+app/api/admin/my-cohorts/route.ts
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+async function getUserIdFromBearer(req: Request) {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error) return null;
+  return data.user?.id ?? null;
+}
+
+export async function GET(req: Request) {
+  const userId = await getUserIdFromBearer(req);
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  // cohorts where membership role is admin
+  const { data, error } = await supabaseAdmin
+    .from("cohort_memberships")
+    .select("cohort_id, role, cohorts(id, name)")
+    .eq("user_id", userId)
+    .eq("role", "admin");
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+
+  const cohorts = (data || [])
+    .map((row: any) => row.cohorts)
+    .filter(Boolean);
+
+  return NextResponse.json({ ok: true, cohorts });
+}
+
+
+⸻
+
+5) API route: list invites for a cohort (admin-only)
+
+app/api/admin/list-invites/route.ts
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+async function getUserIdFromBearer(req: Request) {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error) return null;
+  return data.user?.id ?? null;
+}
+
+export async function GET(req: Request) {
+  const userId = await getUserIdFromBearer(req);
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { searchParams } = new URL(req.url);
+  const cohortId = Number(searchParams.get("cohortId") || "");
+
+  if (!cohortId) return NextResponse.json({ error: "cohortId required" }, { status: 400 });
+
+  // Verify requester is admin of cohort
+  const { data: mem } = await supabaseAdmin
+    .from("cohort_memberships")
+    .select("role")
+    .eq("cohort_id", cohortId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (!mem || mem.role !== "admin") {
+    return NextResponse.json({ error: "Admin only" }, { status: 403 });
+  }
+
+  const { data: invites, error } = await supabaseAdmin
+    .from("cohort_invites")
+    .select("id, code, role, max_uses, uses, is_active, expires_at, created_at")
+    .eq("cohort_id", cohortId)
+    .order("created_at", { ascending: false });
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+
+  return NextResponse.json({ ok: true, invites });
+}
+
+
+⸻
+
+6) Make sure you already have these routes
+
+You already asked for invite-only, so these should exist:
+	•	app/api/join/route.ts
+	•	app/api/admin/create-invite/route.ts
+
+If you want, I can also generate:
+	•	/login page (Supabase email magic link or password)
+	•	/dashboard HUD page (Rank, XP bar, streak, today’s quest list)
+	•	/today logging page (the main “checklist + inputs” screen)
+
+Just say: “Generate dashboard + today pages.”

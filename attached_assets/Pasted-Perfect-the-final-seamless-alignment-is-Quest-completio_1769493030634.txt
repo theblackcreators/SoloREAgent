@@ -1,0 +1,252 @@
+Perfect — the final seamless alignment is: Quest completion is rule-driven, not title-driven.
+
+That means:
+	•	You can rename quests anytime without breaking auto-complete.
+	•	Frontend + backend always agree because the rule snapshot lives on the daily quest record.
+
+Below is the full upgrade (DB + API + engine). Drop-in.
+
+⸻
+
+1) DB migration: add rule JSON to templates + snapshot to daily quests
+
+Run this in Supabase SQL editor:
+
+-- 1) Templates: store canonical completion logic
+alter table public.quest_templates
+  add column if not exists completion_rule jsonb;
+
+-- 2) Daily quests: snapshot the rule used at generation time
+alter table public.daily_quests
+  add column if not exists completion_rule jsonb;
+
+-- Optional performance (not required)
+create index if not exists idx_daily_quests_rule on public.daily_quests using gin (completion_rule);
+create index if not exists idx_templates_rule on public.quest_templates using gin (completion_rule);
+
+
+⸻
+
+2) Define the rule format (simple + powerful)
+
+Rule examples:
+
+Single condition
+
+{ "all": [ { "field": "steps", "op": "gte", "value": 7000 } ] }
+
+Multiple requirements
+
+{
+  "all": [
+    { "field": "calls", "op": "gte", "value": 20 },
+    { "field": "texts", "op": "gte", "value": 40 }
+  ]
+}
+
+Either/or
+
+{
+  "any": [
+    { "field": "convos", "op": "gte", "value": 5 },
+    { "field": "appts", "op": "gte", "value": 1 }
+  ]
+}
+
+“3 of 4 mandatory proxies” (streak-style daily quest)
+
+{
+  "atLeast": {
+    "count": 3,
+    "of": [
+      { "field": "steps", "op": "gte", "value": 7000 },
+      { "field": "workout_done", "op": "eq", "value": true },
+      { "field": "learning_minutes", "op": "gte", "value": 20 },
+      { "any": [
+        { "field": "convos", "op": "gte", "value": 5 },
+        { "field": "appts", "op": "gte", "value": 1 }
+      ]}
+    ]
+  }
+}
+
+
+⸻
+
+3) Add a generic evaluator used by backend (no title matching)
+
+Create:
+
+lib/ruleEngine.ts
+
+export type LogInput = {
+  steps: number;
+  workout_done: boolean;
+  learning_minutes: number;
+  calls: number;
+  texts: number;
+  convos: number;
+  leads: number;
+  appts: number;
+  content_done: boolean;
+};
+
+type Op = "eq" | "neq" | "gt" | "gte" | "lt" | "lte";
+
+type Condition =
+  | { field: keyof LogInput; op: Op; value: any }
+  | { all: Condition[] }
+  | { any: Condition[] }
+  | { not: Condition }
+  | { atLeast: { count: number; of: Condition[] } };
+
+function getField(log: LogInput, field: keyof LogInput) {
+  return (log as any)[field];
+}
+
+function compare(a: any, op: Op, b: any): boolean {
+  switch (op) {
+    case "eq": return a === b;
+    case "neq": return a !== b;
+    case "gt": return a > b;
+    case "gte": return a >= b;
+    case "lt": return a < b;
+    case "lte": return a <= b;
+    default: return false;
+  }
+}
+
+export function evaluateRule(rule: any, log: LogInput): boolean {
+  if (!rule) return false;
+
+  // Leaf condition
+  if (typeof rule.field === "string" && typeof rule.op === "string") {
+    const v = getField(log, rule.field as keyof LogInput);
+    return compare(v, rule.op as Op, rule.value);
+  }
+
+  // all / any / not
+  if (Array.isArray(rule.all)) return rule.all.every((c: any) => evaluateRule(c, log));
+  if (Array.isArray(rule.any)) return rule.any.some((c: any) => evaluateRule(c, log));
+  if (rule.not) return !evaluateRule(rule.not, log);
+
+  // atLeast N of
+  if (rule.atLeast?.count && Array.isArray(rule.atLeast.of)) {
+    const count = Number(rule.atLeast.count);
+    const passes = rule.atLeast.of.reduce((acc: number, c: any) => acc + (evaluateRule(c, log) ? 1 : 0), 0);
+    return passes >= count;
+  }
+
+  return false;
+}
+
+
+⸻
+
+4) Update quest auto-complete to use completion_rule first (fallback safe)
+
+In your /api/log/route.ts (the XP-delta one), replace the quest evaluation loop with this:
+
+Replace this block
+
+const should = shouldCompleteQuest(q.title, nextLog);
+
+With this logic
+
+import { evaluateRule } from "@/lib/ruleEngine";
+// keep shouldCompleteQuest import as fallback for old quests without rules
+
+const rule = (q as any).completion_rule; // will exist after migration + regen
+const should =
+  rule ? evaluateRule(rule, nextLog) : shouldCompleteQuest(q.title, nextLog);
+
+Also update the quest fetch to include the rule:
+
+const { data: quests } = await supabaseAdmin
+  .from("daily_quests")
+  .select("id,title,completed,completion_rule")
+  .eq("user_id", userId)
+  .eq("cohort_id", cid)
+  .eq("quest_date", logDate);
+
+✅ Now: if a quest has a rule, titles don’t matter.
+
+⸻
+
+5) Ensure daily quests copy the template rule (snapshotted)
+
+Wherever you generate daily quests (seed/create day), update your insert so each daily quest row includes completion_rule from the template.
+
+Example pattern:
+
+// templates pulled from quest_templates
+const dailyRows = templates.map(t => ({
+  user_id: userId,
+  cohort_id: cohortId,
+  quest_date: date,
+  title: t.title,
+  quest_type: t.quest_type,
+  xp_reward: t.xp_reward,
+  completion_rule: t.completion_rule ?? null, // snapshot
+  completed: false,
+}));
+
+Critical: snapshotting means if you change a template later, it won’t rewrite past days (audit-clean).
+
+⸻
+
+6) Populate completion rules for your current core quests (one-time)
+
+Run an UPDATE in SQL (adjust titles if yours differ):
+
+update public.quest_templates
+set completion_rule = jsonb_build_object(
+  'all', jsonb_build_array(
+    jsonb_build_object('field','steps','op','gte','value',7000)
+  )
+)
+where lower(title) like 'move:%';
+
+update public.quest_templates
+set completion_rule = jsonb_build_object(
+  'all', jsonb_build_array(
+    jsonb_build_object('field','workout_done','op','eq','value',true)
+  )
+)
+where lower(title) like 'train:%';
+
+update public.quest_templates
+set completion_rule = jsonb_build_object(
+  'all', jsonb_build_array(
+    jsonb_build_object('field','learning_minutes','op','gte','value',20)
+  )
+)
+where lower(title) like 'learn:%';
+
+update public.quest_templates
+set completion_rule = jsonb_build_object(
+  'any', jsonb_build_array(
+    jsonb_build_object('field','convos','op','gte','value',5),
+    jsonb_build_object('field','appts','op','gte','value',1),
+    jsonb_build_object('all', jsonb_build_array(
+      jsonb_build_object('field','calls','op','gte','value',20),
+      jsonb_build_object('field','texts','op','gte','value',40)
+    ))
+  )
+)
+where lower(title) like 'hunt:%';
+
+For “Dungeon Check-In” leave rule null (it’s map-driven).
+
+⸻
+
+7) Final alignment checklist (you’re now “no drift”)
+	•	✅ Templates store completion_rule
+	•	✅ Daily quests snapshot completion_rule
+	•	✅ /api/log completes quests via rule engine (fallback safe)
+	•	✅ Frontend just shows completed state from DB (no guessing)
+	•	✅ Titles can change without breaking completion
+
+⸻
+
+If you tell me where your “daily quest generation” happens (endpoint/file name), I’ll paste the exact patch in that file too. But the logic above is the full final system: rule-driven, snapshot-based, audit-clean, zero drift.

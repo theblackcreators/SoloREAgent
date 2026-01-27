@@ -1,0 +1,272 @@
+Got you — here’s the Elite Admin Upgrade: “Paste Place Name → auto-fill address + lat/lng” using Mapbox Geocoding (no Google dependency).
+
+You’ll get:
+	1.	Server API /api/admin/geocode (admin-only)
+	2.	UI module on /admin/locations:
+	•	search by place name
+	•	shows top results
+	•	one-click Apply to Add Form
+	•	optional: Apply to Selected Row
+
+⸻
+
+1) Env vars
+
+Add (you already have these, but confirm):
+
+MAPBOX_TOKEN=YOUR_MAPBOX_TOKEN
+NEXT_PUBLIC_MAPBOX_TOKEN=YOUR_MAPBOX_TOKEN
+
+
+⸻
+
+2) Admin Geocode API Route
+
+app/api/admin/geocode/route.ts
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+async function getUserIdFromBearer(req: Request) {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+  const { data } = await supabaseAdmin.auth.getUser(token);
+  return data.user?.id ?? null;
+}
+
+async function assertAdmin(userId: string, cohortId: number) {
+  const { data: mem } = await supabaseAdmin
+    .from("cohort_memberships")
+    .select("role")
+    .eq("cohort_id", cohortId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  return !!mem && mem.role === "admin";
+}
+
+export async function GET(req: Request) {
+  const userId = await getUserIdFromBearer(req);
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { searchParams } = new URL(req.url);
+  const cohortId = Number(searchParams.get("cohortId") || "");
+  const q = (searchParams.get("q") || "").trim();
+
+  if (!cohortId) return NextResponse.json({ error: "cohortId required" }, { status: 400 });
+  if (!q) return NextResponse.json({ error: "q required" }, { status: 400 });
+
+  if (!(await assertAdmin(userId, cohortId))) {
+    return NextResponse.json({ error: "Admin only" }, { status: 403 });
+  }
+
+  const token = process.env.MAPBOX_TOKEN;
+  if (!token) return NextResponse.json({ error: "Missing MAPBOX_TOKEN" }, { status: 500 });
+
+  // Bias to Houston; keep results practical for your use-case
+  const proximity = "-95.3698,29.7604"; // Houston
+  const bbox = "-95.95,29.40,-94.90,30.20"; // Greater Houston-ish
+  const limit = 6;
+
+  const url =
+    `https://api.mapbox.com/geocoding/v5/mapbox.places/` +
+    `${encodeURIComponent(q)}.json` +
+    `?access_token=${encodeURIComponent(token)}` +
+    `&limit=${limit}` +
+    `&proximity=${proximity}` +
+    `&bbox=${bbox}` +
+    `&types=poi,address,place,neighborhood` +
+    `&autocomplete=true`;
+
+  const r = await fetch(url, { method: "GET" });
+  if (!r.ok) {
+    const t = await r.text();
+    return NextResponse.json({ error: `Mapbox error: ${t}` }, { status: 400 });
+  }
+
+  const data = await r.json();
+
+  const results = (data.features || []).map((f: any) => ({
+    id: f.id,
+    name: f.text,
+    place_name: f.place_name,
+    address:
+      (f.properties?.address ? `${f.properties.address} ${f.text}` : f.place_name) || f.place_name,
+    // Mapbox returns [lng, lat]
+    lng: f.center?.[0] ?? null,
+    lat: f.center?.[1] ?? null,
+    category: f.properties?.category ?? null,
+    types: f.place_type ?? [],
+  }));
+
+  return NextResponse.json({ ok: true, results });
+}
+
+
+⸻
+
+3) Upgrade /admin/locations UI
+
+A) Add state (inside AdminLocationsPage() near other useStates)
+
+  // Elite Geocoder
+  const [geoQuery, setGeoQuery] = useState("");
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [geoResults, setGeoResults] = useState<any[]>([]);
+
+B) Add function to call the geocoder (inside component)
+
+  async function geocodeSearch() {
+    setMsg("");
+    if (!cohortId) {
+      setMsg("Select a cohort first.");
+      return;
+    }
+    const token = await getToken();
+    if (!token) return;
+
+    const q = geoQuery.trim();
+    if (!q) return;
+
+    setGeoLoading(true);
+    try {
+      const res = await fetch(
+        `/api/admin/geocode?cohortId=${cohortId}&q=${encodeURIComponent(q)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setMsg(data?.error || "Geocode failed.");
+        setGeoResults([]);
+        return;
+      }
+      setGeoResults(data.results || []);
+    } finally {
+      setGeoLoading(false);
+    }
+  }
+
+C) Add the Elite Geocoder UI block
+
+Place this inside the left card, under your “Coordinate Helper” block (or replace it—this is better).
+
+            <div className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+              <div className="text-sm font-semibold text-zinc-200">Elite Geocoder</div>
+              <div className="mt-1 text-xs text-zinc-400">
+                Type a place name (e.g. <span className="font-mono">“Humble Civic Center”</span>,{" "}
+                <span className="font-mono">“Buffalo Bayou Park”</span>) and auto-fill address + coordinates.
+              </div>
+
+              <div className="mt-3 flex gap-2">
+                <input
+                  value={geoQuery}
+                  onChange={(e) => setGeoQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") geocodeSearch();
+                  }}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-900/30 px-4 py-3 text-sm outline-none focus:border-zinc-600"
+                  placeholder="Search a Houston place…"
+                />
+                <button
+                  type="button"
+                  onClick={geocodeSearch}
+                  disabled={!geoQuery.trim() || geoLoading || !cohortId}
+                  className="rounded-xl bg-zinc-100 px-4 py-3 text-sm font-semibold text-zinc-950 disabled:opacity-50"
+                >
+                  {geoLoading ? "Searching…" : "Search"}
+                </button>
+              </div>
+
+              {geoResults.length ? (
+                <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800">
+                  <div className="bg-zinc-900/30 px-4 py-2 text-xs text-zinc-300">
+                    Results (click to apply)
+                  </div>
+
+                  <div className="divide-y divide-zinc-800">
+                    {geoResults.map((r) => (
+                      <div key={r.id} className="px-4 py-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-zinc-100">{r.name}</div>
+                            <div className="mt-1 text-xs text-zinc-400">{r.place_name}</div>
+                            <div className="mt-1 text-[11px] text-zinc-500">
+                              {typeof r.lat === "number" && typeof r.lng === "number"
+                                ? `${r.lat.toFixed(6)}, ${r.lng.toFixed(6)}`
+                                : "No coords"}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                // Apply to Add Form
+                                setNewLoc({
+                                  ...newLoc,
+                                  name: newLoc.name || r.name || "",
+                                  address: r.place_name || "",
+                                  lat: typeof r.lat === "number" ? String(r.lat) : "",
+                                  lng: typeof r.lng === "number" ? String(r.lng) : "",
+                                });
+                                setMsg("Applied geocode result to Add Location form.");
+                              }}
+                              className="rounded-xl bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-950"
+                            >
+                              Apply to Add
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={!selectedLocationId}
+                              onClick={() => {
+                                if (!selectedLocationId) return;
+                                patchLocation(Number(selectedLocationId), {
+                                  address: r.place_name,
+                                  lat: r.lat,
+                                  lng: r.lng,
+                                } as any);
+                                setMsg("Applied geocode result to selected row.");
+                              }}
+                              className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 disabled:opacity-50"
+                            >
+                              Apply to Row
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 text-xs text-zinc-500">
+                  No results yet. Search to populate suggestions.
+                </div>
+              )}
+
+              <div className="mt-4 text-[11px] text-zinc-500">
+                Pro move: select the correct POI, then tweak <span className="font-mono">zone</span>,{" "}
+                <span className="font-mono">category</span>, and <span className="font-mono">mission</span>.
+              </div>
+            </div>
+
+
+⸻
+
+4) Optional: “One-click categorize” (elite taste)
+
+If you want categories to auto-fill (coffee / park / coworking / school), we can map Mapbox category → your internal categories and auto-set newLoc.category.
+
+Say: “Add category auto-mapper” and I’ll drop the mapping logic in.
+
+⸻
+
+5) Best-practice (so you don’t get rate limited)
+
+If you want, I can add:
+	•	500ms debounce
+	•	cache results by query in memory
+	•	a “search cooldown” per admin
+
+Just say: “Add debounce + caching.”

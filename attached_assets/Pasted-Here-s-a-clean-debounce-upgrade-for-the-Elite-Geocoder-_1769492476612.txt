@@ -1,0 +1,149 @@
+Here’s a clean debounce upgrade for the Elite Geocoder on /admin/locations that:
+	•	✅ waits ~500ms after typing before searching
+	•	✅ cancels stale requests (so old results don’t overwrite new ones)
+	•	✅ still lets Enter / Search button run immediately
+
+⸻
+
+1) Add these refs + state (inside AdminLocationsPage())
+
+Put near your geocoder state:
+
+  // Debounce + request cancellation
+  const geoAbortRef = useRef<AbortController | null>(null);
+  const geoDebounceRef = useRef<number | null>(null);
+
+Also update your imports at top of app/admin/locations/page.tsx:
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+
+⸻
+
+2) Update geocodeSearch() to support abort + optional query override
+
+Replace your current geocodeSearch with this:
+
+  async function geocodeSearch(qOverride?: string) {
+    setMsg("");
+    if (!cohortId) {
+      setMsg("Select a cohort first.");
+      return;
+    }
+    const token = await getToken();
+    if (!token) return;
+
+    const q = (qOverride ?? geoQuery).trim();
+    if (!q) {
+      setGeoResults([]);
+      return;
+    }
+
+    // Abort any in-flight request
+    if (geoAbortRef.current) geoAbortRef.current.abort();
+    const ac = new AbortController();
+    geoAbortRef.current = ac;
+
+    setGeoLoading(true);
+    try {
+      const res = await fetch(
+        `/api/admin/geocode?cohortId=${cohortId}&q=${encodeURIComponent(q)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: ac.signal,
+        }
+      );
+
+      const data = await res.json();
+
+      // If aborted, stop
+      if (ac.signal.aborted) return;
+
+      if (!res.ok) {
+        setMsg(data?.error || "Geocode failed.");
+        setGeoResults([]);
+        return;
+      }
+
+      setGeoResults(data.results || []);
+    } catch (e: any) {
+      // Ignore abort errors
+      if (e?.name !== "AbortError") {
+        setMsg(e?.message || "Geocode error.");
+      }
+    } finally {
+      // Only clear loading if this request is still current
+      if (!ac.signal.aborted) setGeoLoading(false);
+    }
+  }
+
+
+⸻
+
+3) Add the debounce effect (auto-search while typing)
+
+Add this useEffect anywhere inside the component:
+
+  useEffect(() => {
+    // Don’t auto-search until cohort is selected
+    if (!cohortId) return;
+
+    const q = geoQuery.trim();
+
+    // Clear pending debounce timer
+    if (geoDebounceRef.current) {
+      window.clearTimeout(geoDebounceRef.current);
+      geoDebounceRef.current = null;
+    }
+
+    // If query empty, clear results and cancel requests
+    if (!q) {
+      if (geoAbortRef.current) geoAbortRef.current.abort();
+      setGeoResults([]);
+      setGeoLoading(false);
+      return;
+    }
+
+    // Debounce: wait 500ms after last keystroke
+    geoDebounceRef.current = window.setTimeout(() => {
+      geocodeSearch(q);
+    }, 500);
+
+    return () => {
+      if (geoDebounceRef.current) {
+        window.clearTimeout(geoDebounceRef.current);
+        geoDebounceRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [geoQuery, cohortId]);
+
+
+⸻
+
+4) Keep Enter + button instant (no change needed, but best practice)
+
+Your input can stay like this:
+
+onKeyDown={(e) => {
+  if (e.key === "Enter") geocodeSearch();
+}}
+
+And the button stays:
+
+onClick={() => geocodeSearch()}
+
+Because geocodeSearch() aborts in-flight requests, instant searches are safe.
+
+⸻
+
+Optional “elite” add-on (1-liner): only auto-search after 3+ chars
+
+Inside the debounce effect, right after const q = geoQuery.trim(); add:
+
+    if (q.length < 3) { setGeoResults([]); return; }
+
+
+⸻
+
+If you want, I can also add query caching (so repeated searches are instant and reduce Mapbox calls).

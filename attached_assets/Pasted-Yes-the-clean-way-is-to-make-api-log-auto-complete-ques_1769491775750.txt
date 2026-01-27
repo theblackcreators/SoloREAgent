@@ -1,0 +1,263 @@
+Yes — the clean way is to make /api/log auto-complete quests based on the numbers you saved, so the checklist becomes “System-driven” instead of manual.
+
+Below is a drop-in upgrade:
+	•	✅ Save log
+	•	✅ Server evaluates quest completion rules
+	•	✅ Server updates daily_quests.completed + completed_at
+	•	✅ Returns which quests were auto-completed (so UI can refresh)
+
+⸻
+
+1) Add an auto-complete rules engine (by quest title)
+
+Create:
+
+lib/questRules.ts
+
+export type LogInput = {
+  steps: number;
+  workout_done: boolean;
+  learning_minutes: number;
+  calls: number;
+  texts: number;
+  convos: number;
+  leads: number;
+  appts: number;
+  content_done: boolean;
+};
+
+export function shouldCompleteQuest(title: string, log: LogInput): boolean {
+  const t = title.toLowerCase();
+
+  // Mandatory proxies (matches your engine)
+  if (t.startsWith("move:")) return log.steps >= 7000;
+  if (t.startsWith("train:")) return log.workout_done;
+  if (t.startsWith("learn:")) return log.learning_minutes >= 20;
+  if (t.startsWith("hunt:")) return (log.convos >= 5 || log.appts >= 1) || (log.calls + log.texts >= 20);
+
+  // Seeded business quests
+  if (t === "20 calls") return log.calls >= 20;
+  if (t === "40 texts/dms") return log.texts >= 40;
+  if (t === "5 real conversations") return log.convos >= 5;
+  if (t === "1 appointment ask") return log.appts >= 1;
+
+  // Content quest
+  if (t === "content drop (short)") return log.content_done;
+
+  // Learning booster
+  if (t === "market intel: your zone") return log.learning_minutes >= 20;
+
+  // Fitness quests — allow workout_done to complete these
+  if (t.includes("full body") || t.includes("cardio") || t.includes("mobility")) {
+    // If you want mobility to be separate, change this to a dedicated toggle later
+    return log.workout_done || log.steps >= 7000;
+  }
+
+  // Location quest is map-based check-in, not log-based
+  if (t === "dungeon check-in") return false;
+
+  return false;
+}
+
+
+⸻
+
+2) Upgrade /api/log to auto-complete today’s quests
+
+Replace your current app/api/log/route.ts with this version (it keeps your XP/stat logic and adds quest updates).
+
+app/api/log/route.ts
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { xpFromLog, statGainsFromLog } from "@/lib/engine";
+import { computeRank } from "@/lib/ranks";
+import { shouldCompleteQuest } from "@/lib/questRules";
+
+export async function POST(req: Request) {
+  const body = await req.json();
+
+  const {
+    userId,
+    cohortId,
+    logDate,
+    steps = 0,
+    workout_done = false,
+    calls = 0,
+    texts = 0,
+    convos = 0,
+    leads = 0,
+    appts = 0,
+    content_done = false,
+    learning_minutes = 0,
+    notes = ""
+  } = body;
+
+  if (!userId || !cohortId || !logDate) {
+    return NextResponse.json({ error: "Missing userId, cohortId, or logDate" }, { status: 400 });
+  }
+
+  // 1) Upsert daily log
+  const { error: logErr } = await supabaseAdmin
+    .from("daily_logs")
+    .upsert(
+      {
+        user_id: userId,
+        cohort_id: cohortId,
+        log_date: logDate,
+        steps,
+        workout_done,
+        calls,
+        texts,
+        convos,
+        leads,
+        appts,
+        content_done,
+        learning_minutes,
+        notes
+      },
+      { onConflict: "user_id,cohort_id,log_date" }
+    );
+
+  if (logErr) return NextResponse.json({ error: logErr.message }, { status: 400 });
+
+  // 2) Fetch member stats
+  const { data: statsRow, error: sErr } = await supabaseAdmin
+    .from("member_stats")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("cohort_id", cohortId)
+    .single();
+
+  if (sErr) return NextResponse.json({ error: sErr.message }, { status: 400 });
+
+  // 3) Compute xp + gains
+  const xpGain = xpFromLog({ workout_done, steps, convos, appts, content_done, learning_minutes });
+  const gains = statGainsFromLog({ workout_done, steps, learning_minutes, convos, appts, content_done });
+
+  const newXp = (statsRow.xp ?? 0) + xpGain;
+  const newRank = computeRank(newXp);
+
+  // Streak logic: 3/4 mandatory proxies = streak continues
+  const mandatoryCount =
+    (steps >= 7000 ? 1 : 0) +
+    (workout_done ? 1 : 0) +
+    ((convos >= 5 || appts >= 1) ? 1 : 0) +
+    (learning_minutes >= 20 ? 1 : 0);
+
+  const newStreak = mandatoryCount >= 3 ? (statsRow.streak + 1) : 0;
+
+  const updatedStats = {
+    xp: newXp,
+    rank: newRank,
+    streak: newStreak,
+    str: statsRow.str + (gains.str ?? 0),
+    sta: statsRow.sta + (gains.sta ?? 0),
+    agi: statsRow.agi + (gains.agi ?? 0),
+    int_stat: statsRow.int_stat + (gains.int_stat ?? 0),
+    cha: statsRow.cha + (gains.cha ?? 0),
+    rep: statsRow.rep + (gains.rep ?? 0),
+    gold: statsRow.gold + (gains.gold ?? 0),
+    updated_at: new Date().toISOString()
+  };
+
+  const { error: upErr } = await supabaseAdmin
+    .from("member_stats")
+    .update(updatedStats)
+    .eq("user_id", userId)
+    .eq("cohort_id", cohortId);
+
+  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
+
+  // 4) AUTO-COMPLETE TODAY'S QUESTS (except dungeon check-in)
+  const { data: quests, error: qErr } = await supabaseAdmin
+    .from("daily_quests")
+    .select("id,title,completed,quest_type")
+    .eq("user_id", userId)
+    .eq("cohort_id", cohortId)
+    .eq("quest_date", logDate);
+
+  if (qErr) return NextResponse.json({ error: qErr.message }, { status: 400 });
+
+  const log = { steps, workout_done, learning_minutes, calls, texts, convos, leads, appts, content_done };
+
+  const toComplete: number[] = [];
+  const toUncomplete: number[] = []; // optional: if you want quests to turn off when numbers drop
+
+  for (const q of quests ?? []) {
+    // Keep dungeon check-in manual (map-based)
+    if ((q.title || "").toLowerCase() === "dungeon check-in") continue;
+
+    const should = shouldCompleteQuest(q.title, log);
+
+    if (should && !q.completed) toComplete.push(q.id);
+    if (!should && q.completed) toUncomplete.push(q.id);
+  }
+
+  // Mark newly completed
+  if (toComplete.length) {
+    const { error } = await supabaseAdmin
+      .from("daily_quests")
+      .update({ completed: true, completed_at: new Date().toISOString() })
+      .in("id", toComplete);
+    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+
+  // Optional: un-complete if user edits numbers down
+  if (toUncomplete.length) {
+    const { error } = await supabaseAdmin
+      .from("daily_quests")
+      .update({ completed: false, completed_at: null })
+      .in("id", toUncomplete);
+    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+
+  return NextResponse.json({
+    ok: true,
+    xpGain,
+    gains,
+    updatedStats,
+    autoCompletedQuestIds: toComplete,
+    autoUncompletedQuestIds: toUncomplete
+  });
+}
+
+
+⸻
+
+3) Update the Today UI to refresh quests after Save
+
+In app/today/page.tsx, inside saveLog() after a successful save, add:
+
+await loadToday(userId, cohortId);
+
+So the checklist updates immediately based on your stats.
+
+⸻
+
+4) Optional: Auto-complete “Dungeon Check-In” when user checks in on map
+
+When you build /map, after inserting location_checkins, also update today’s quest:
+
+await supabase
+  .from("daily_quests")
+  .update({ completed: true, completed_at: new Date().toISOString() })
+  .eq("user_id", userId)
+  .eq("cohort_id", cohortId)
+  .eq("quest_date", today)
+  .eq("title", "Dungeon Check-In");
+
+
+⸻
+
+5) (Recommended) Make your templates rule-driven later
+
+Right now rules are based on title, which is perfect for MVP.
+
+When you’re ready to scale, we’ll switch to:
+	•	quest_templates.required_inputs + a completion_rule JSON (e.g., { "steps": { "gte": 7000 } })
+	•	and the engine evaluates rules generically (no title mapping needed)
+
+⸻
+
+If you want, I can generate the /map page next (Mapbox pins + check-in + auto-complete “Dungeon Check-In”).

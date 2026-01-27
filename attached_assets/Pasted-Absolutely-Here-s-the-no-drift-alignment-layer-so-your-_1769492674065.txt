@@ -1,0 +1,193 @@
+Absolutely. Here’s the “no-drift” alignment layer so your frontend + backend stay perfectly in sync (quests, logs, geocode, locations CRUD).
+
+1) Single source of truth: shared types + validation
+
+Create a shared schema module and use it both in API routes and UI.
+
+lib/contracts.ts
+
+import { z } from "zod";
+
+export const IdSchema = z.union([z.number().int().positive(), z.string().regex(/^\d+$/).transform(Number)]);
+
+export const LogPayloadSchema = z.object({
+  userId: z.string().min(1),
+  cohortId: IdSchema,
+  logDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  steps: z.number().int().nonnegative().default(0),
+  workout_done: z.boolean().default(false),
+  learning_minutes: z.number().int().nonnegative().default(0),
+  calls: z.number().int().nonnegative().default(0),
+  texts: z.number().int().nonnegative().default(0),
+  convos: z.number().int().nonnegative().default(0),
+  leads: z.number().int().nonnegative().default(0),
+  appts: z.number().int().nonnegative().default(0),
+  content_done: z.boolean().default(false),
+  notes: z.string().default(""),
+});
+
+export const AdminGeocodeQuerySchema = z.object({
+  cohortId: IdSchema,
+  q: z.string().min(2),
+});
+
+export const LocationCreateSchema = z.object({
+  cohortId: IdSchema,
+  programId: IdSchema,
+  location: z.object({
+    zone: z.string().min(1),
+    name: z.string().min(1),
+    category: z.string().min(1),
+    address: z.string().nullable().optional(),
+    lat: z.union([z.number(), z.string(), z.null()]).optional(),
+    lng: z.union([z.number(), z.string(), z.null()]).optional(),
+    suggested_mission: z.string().nullable().optional(),
+  }),
+});
+
+export const LocationPatchSchema = z.object({
+  cohortId: IdSchema,
+  id: IdSchema,
+  patch: z.record(z.any()),
+});
+
+Why this matters: the UI can’t send “wrong-shaped” payloads; the API can’t accept them.
+
+⸻
+
+2) API routes must validate inputs + return typed responses
+
+In every route (/api/log, /api/admin/locations, /api/admin/geocode) do:
+	•	schema.parse(...) on inbound payload/query
+	•	return consistent response envelopes
+
+Example for /api/log (top of handler):
+
+import { LogPayloadSchema } from "@/lib/contracts";
+
+const raw = await req.json();
+const payload = LogPayloadSchema.parse(raw);
+
+Return a predictable object:
+
+return NextResponse.json({
+  ok: true,
+  xpGain,
+  updatedStats,
+  autoCompletedQuestIds,
+});
+
+Frontend should only rely on these keys.
+
+⸻
+
+3) Client → server auth alignment (no mismatch)
+
+Rule:
+	•	UI uses user session token (Bearer)
+	•	Admin APIs verify membership role
+	•	Server uses service role only after auth passes
+
+Standardize a helper in lib/api.ts:
+
+lib/api.ts
+
+import { supabase } from "@/lib/supabaseClient";
+
+export async function authedFetch(url: string, init?: RequestInit) {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new Error("Not authenticated");
+
+  return fetch(url, {
+    ...init,
+    headers: {
+      ...(init?.headers || {}),
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+}
+
+Now your pages can’t “forget” auth headers.
+
+⸻
+
+4) UI consistency: always re-fetch from the DB after a mutation
+
+To guarantee no drift between “what the UI thinks” and “what DB is”:
+	•	After saving log: reload quests + stats
+	•	After check-in: reload checkins + today quests
+	•	After admin edit: refresh list or patch local state with returned row
+
+You already do this in places—make it a standard pattern:
+
+Today page after save:
+
+await loadToday(userId, cohortId); // quests reflect server auto-complete
+
+Dashboard page after toggles or other actions:
+
+await loadDashboard(userId, cohortId); // stats + quests are authoritative
+
+
+⸻
+
+5) Remove the chance of “double updates” (idempotency)
+
+Your log endpoint should be safe if user taps Save twice.
+
+Add an idempotency key (optional but elite):
+	•	client sends idempotencyKey = ${userId}:${cohortId}:${logDate}
+	•	server stores it in a table or uses daily_logs conflict key as the idempotency boundary
+
+Since you already upsert with onConflict, you’re mostly safe. The remaining risk is double XP if you always “add XP” without checking prior log state.
+
+Best fix: compute XP based on the stored log row and overwrite/adjust.
+Pattern:
+	1.	load existing log (before upsert)
+	2.	compute previous xpGain vs new xpGain
+	3.	add delta, not full xpGain
+
+That gives true “edit log” behavior with perfect correctness.
+
+⸻
+
+6) Align quest completion rules with quest templates, not titles (next-level)
+
+Title-based rules are MVP-fast but can drift when titles change.
+
+Upgrade schema:
+	•	quest_templates.completion_rule JSONB
+	•	generated daily_quests.rule copied snapshot
+
+Then evaluate generically:
+
+{ "steps": { "gte": 7000 }, "workout_done": { "eq": true } }
+
+No more brittle matching.
+
+⸻
+
+7) Observable correctness: add a “Contract Drift Test” endpoint
+
+Create /api/health/contracts that returns:
+	•	schema version
+	•	DB schema version (manual constant)
+	•	list of required columns present (quick check)
+
+So you know immediately when frontend expects something DB/API doesn’t provide.
+
+⸻
+
+8) Practical checklist (do these now)
+	•	Add lib/contracts.ts with Zod schemas
+	•	Validate in every API route with .parse()
+	•	Use authedFetch() everywhere in UI
+	•	After every mutation, refetch authoritative data
+	•	Implement XP delta so saving twice doesn’t stack XP
+	•	(Soon) move quest rules from title → completion_rule
+
+⸻
+
+If you want, I’ll implement the XP-delta upgrade in /api/log next (that’s the #1 “seamless alignment” gap left, because it prevents stat drift when you edit a day).

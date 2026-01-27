@@ -1,0 +1,473 @@
+Awesome — here’s a drop-in /map page (Mapbox + Supabase) that:
+
+✅ loads “Houston Dungeons” from locations
+✅ filters by zone (EaDo / Humble/Atascocita / Kingwood / Summerwood)
+✅ lets the user Check In (writes location_checkins)
+✅ auto-completes today’s “Dungeon Check-In” quest (updates daily_quests)
+✅ works even if some locations have no lat/lng (shows list view)
+
+⸻
+
+0) Install Mapbox GL
+
+npm i mapbox-gl
+
+Add env var:
+
+MAPBOX_TOKEN=YOUR_MAPBOX_TOKEN
+NEXT_PUBLIC_MAPBOX_TOKEN=YOUR_MAPBOX_TOKEN
+
+
+⸻
+
+1) RLS for locations (only if you enabled it)
+
+If locations is public read, you’re good.
+If you enabled RLS on locations, run:
+
+alter table public.locations enable row level security;
+
+create policy "locations_read_all" on public.locations
+for select using (true);
+
+(Keep location_checkins RLS as “own only” like you already have.)
+
+⸻
+
+2) /map Page (Map + List + Check-ins)
+
+app/map/page.tsx
+
+"use client";
+
+import "mapbox-gl/dist/mapbox-gl.css";
+import mapboxgl from "mapbox-gl";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { supabase } from "@/lib/supabaseClient";
+import { localISODate } from "@/lib/date";
+
+type LocationRow = {
+  id: number;
+  program_id: number;
+  zone: string;
+  name: string;
+  category: string;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  suggested_mission: string | null;
+};
+
+type CheckinRow = {
+  location_id: number;
+};
+
+const ZONES = ["EaDo", "Humble/Atascocita", "Kingwood", "Summerwood"] as const;
+
+export default function MapPage() {
+  const today = useMemo(() => localISODate(), []);
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<mapboxgl.Map | null>(null);
+  const markersRef = useRef<mapboxgl.Marker[]>([]);
+
+  const [userId, setUserId] = useState<string | null>(null);
+  const [cohortId, setCohortId] = useState<number | null>(null);
+  const [programId, setProgramId] = useState<number | null>(null);
+
+  const [zone, setZone] = useState<string>("EaDo");
+  const [locations, setLocations] = useState<LocationRow[]>([]);
+  const [checkins, setCheckins] = useState<Set<number>>(new Set());
+  const [msg, setMsg] = useState<string>("");
+
+  // Houston default center (Downtown-ish)
+  const defaultCenter: [number, number] = [-95.3698, 29.7604];
+
+  async function resolveUserAndCohort() {
+    setMsg("");
+    const { data: auth } = await supabase.auth.getUser();
+    const uid = auth.user?.id ?? null;
+    if (!uid) {
+      setMsg("Please log in.");
+      return;
+    }
+    setUserId(uid);
+
+    const saved = Number(localStorage.getItem("sra_last_cohort_id") || "");
+    if (saved) {
+      setCohortId(saved);
+      return;
+    }
+
+    const { data: memberships } = await supabase
+      .from("cohort_memberships")
+      .select("cohort_id")
+      .eq("user_id", uid);
+
+    const first = memberships?.[0]?.cohort_id ?? null;
+    if (first) {
+      setCohortId(first);
+      localStorage.setItem("sra_last_cohort_id", String(first));
+    } else {
+      setMsg("No cohort found. Join with an invite code at /join.");
+    }
+  }
+
+  async function resolveProgramId(cid: number) {
+    // Cohort -> program_id
+    const { data, error } = await supabase
+      .from("cohorts")
+      .select("program_id")
+      .eq("id", cid)
+      .single();
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+    setProgramId(data.program_id);
+  }
+
+  async function loadLocations(pid: number) {
+    setMsg("");
+    const { data, error } = await supabase
+      .from("locations")
+      .select("id, program_id, zone, name, category, address, lat, lng, suggested_mission")
+      .eq("program_id", pid);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+    setLocations((data || []) as any);
+  }
+
+  async function loadTodayCheckins(uid: string, cid: number) {
+    setMsg("");
+    const { data, error } = await supabase
+      .from("location_checkins")
+      .select("location_id")
+      .eq("user_id", uid)
+      .eq("checkin_date", today);
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+    setCheckins(new Set((data || []).map((r: CheckinRow) => r.location_id)));
+  }
+
+  function initMap() {
+    if (mapRef.current || !mapContainerRef.current) return;
+
+    const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
+    if (!token) {
+      setMsg("Missing NEXT_PUBLIC_MAPBOX_TOKEN.");
+      return;
+    }
+    mapboxgl.accessToken = token;
+
+    mapRef.current = new mapboxgl.Map({
+      container: mapContainerRef.current,
+      style: "mapbox://styles/mapbox/dark-v11",
+      center: defaultCenter,
+      zoom: 10,
+    });
+
+    mapRef.current.addControl(new mapboxgl.NavigationControl(), "top-right");
+  }
+
+  function clearMarkers() {
+    for (const m of markersRef.current) m.remove();
+    markersRef.current = [];
+  }
+
+  function renderMarkers(filtered: LocationRow[]) {
+    if (!mapRef.current) return;
+    clearMarkers();
+
+    const withCoords = filtered.filter((l) => typeof l.lat === "number" && typeof l.lng === "number");
+
+    for (const loc of withCoords) {
+      const el = document.createElement("div");
+      el.style.width = "10px";
+      el.style.height = "10px";
+      el.style.borderRadius = "999px";
+      el.style.border = "1px solid #a1a1aa"; // zinc-400
+      el.style.background = checkins.has(loc.id) ? "#a3e635" : "#e5e7eb"; // lime-ish when checked in
+
+      const marker = new mapboxgl.Marker({ element: el })
+        .setLngLat([loc.lng!, loc.lat!])
+        .setPopup(
+          new mapboxgl.Popup({ offset: 14 }).setHTML(
+            `<div style="font-family: ui-sans-serif; color:#111; max-width:240px;">
+              <div style="font-weight:700; margin-bottom:4px;">${escapeHtml(loc.name)}</div>
+              <div style="font-size:12px; margin-bottom:6px;">${escapeHtml(loc.category)} • ${escapeHtml(loc.zone)}</div>
+              ${loc.address ? `<div style="font-size:12px; margin-bottom:6px;">${escapeHtml(loc.address)}</div>` : ""}
+              ${loc.suggested_mission ? `<div style="font-size:12px;"><b>Mission:</b> ${escapeHtml(loc.suggested_mission)}</div>` : ""}
+            </div>`
+          )
+        )
+        .addTo(mapRef.current);
+
+      markersRef.current.push(marker);
+    }
+
+    // Fit bounds if we have points
+    if (withCoords.length >= 2) {
+      const bounds = new mapboxgl.LngLatBounds();
+      withCoords.forEach((l) => bounds.extend([l.lng!, l.lat!]));
+      mapRef.current.fitBounds(bounds, { padding: 60, maxZoom: 13 });
+    } else if (withCoords.length === 1) {
+      mapRef.current.flyTo({ center: [withCoords[0].lng!, withCoords[0].lat!], zoom: 12 });
+    }
+  }
+
+  async function checkIn(locationId: number) {
+    setMsg("");
+    if (!userId || !cohortId) {
+      setMsg("Missing user or cohort.");
+      return;
+    }
+
+    // 1) Insert check-in (unique per location/date)
+    const { error: cErr } = await supabase.from("location_checkins").insert({
+      user_id: userId,
+      location_id: locationId,
+      checkin_date: today,
+      notes: "",
+    });
+
+    // If already checked in today, ignore duplicate constraint errors gracefully
+    if (cErr && !String(cErr.message).toLowerCase().includes("duplicate")) {
+      setMsg(cErr.message);
+      return;
+    }
+
+    // 2) Auto-complete today's "Dungeon Check-In" quest
+    const { error: qErr } = await supabase
+      .from("daily_quests")
+      .update({ completed: true, completed_at: new Date().toISOString() })
+      .eq("user_id", userId)
+      .eq("cohort_id", cohortId)
+      .eq("quest_date", today)
+      .eq("title", "Dungeon Check-In");
+
+    if (qErr) {
+      // Not fatal—quests might not exist yet
+      setMsg(`Checked in. (Quest update: ${qErr.message})`);
+    } else {
+      setMsg("Checked in. Dungeon quest completed.");
+    }
+
+    // 3) Refresh checkins + markers
+    await loadTodayCheckins(userId, cohortId);
+  }
+
+  // Boot sequence
+  useEffect(() => {
+    resolveUserAndCohort();
+    initMap();
+
+    return () => {
+      // Cleanup map on unmount
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (cohortId) resolveProgramId(cohortId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cohortId]);
+
+  useEffect(() => {
+    if (programId) loadLocations(programId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [programId]);
+
+  useEffect(() => {
+    if (userId && cohortId) loadTodayCheckins(userId, cohortId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, cohortId]);
+
+  // Re-render markers when data / zone / checkins change
+  useEffect(() => {
+    const filtered = locations.filter((l) => l.zone === zone);
+    renderMarkers(filtered);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locations, zone, checkins]);
+
+  const filtered = useMemo(() => locations.filter((l) => l.zone === zone), [locations, zone]);
+  const hasCoords = filtered.some((l) => typeof l.lat === "number" && typeof l.lng === "number");
+
+  return (
+    <main className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="mx-auto max-w-6xl px-6 py-12">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Houston Dungeons</h1>
+            <p className="mt-1 text-sm text-zinc-300">
+              {today} {cohortId ? `(Cohort #${cohortId})` : ""}
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Link
+              href="/dashboard"
+              className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2 text-sm text-zinc-200"
+            >
+              Back to HUD
+            </Link>
+            <Link
+              href="/today"
+              className="rounded-xl bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-950"
+            >
+              Log Today
+            </Link>
+          </div>
+        </div>
+
+        {msg ? (
+          <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 text-sm text-zinc-200">
+            {msg}
+          </div>
+        ) : null}
+
+        <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-7">
+          {/* Left: Controls + List */}
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 lg:col-span-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-semibold text-zinc-200">Select Zone</div>
+                <div className="mt-1 text-xs text-zinc-400">
+                  Explore + meet people + check in to complete the dungeon quest.
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <select
+                value={zone}
+                onChange={(e) => setZone(e.target.value)}
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-sm outline-none focus:border-zinc-600"
+              >
+                {ZONES.map((z) => (
+                  <option key={z} value={z}>
+                    {z}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mt-5 text-xs text-zinc-500">
+              {hasCoords
+                ? "Map pins shown for locations that have coordinates."
+                : "This zone has no coordinates yet—list check-ins still work."}
+            </div>
+
+            <div className="mt-6 overflow-hidden rounded-xl border border-zinc-800">
+              <div className="bg-zinc-950 px-4 py-3 text-xs text-zinc-300">
+                Locations in {zone}
+              </div>
+              <div className="divide-y divide-zinc-800">
+                {filtered.length === 0 ? (
+                  <div className="px-4 py-4 text-sm text-zinc-400">No locations found.</div>
+                ) : (
+                  filtered.map((l) => {
+                    const done = checkins.has(l.id);
+                    return (
+                      <div key={l.id} className="px-4 py-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-zinc-100">{l.name}</div>
+                            <div className="mt-1 text-xs text-zinc-400">
+                              {l.category}
+                              {l.address ? ` • ${l.address}` : ""}
+                            </div>
+                            {l.suggested_mission ? (
+                              <div className="mt-2 text-xs text-zinc-300">
+                                <span className="text-zinc-400">Mission:</span>{" "}
+                                {l.suggested_mission}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <button
+                            onClick={() => checkIn(l.id)}
+                            className={`shrink-0 rounded-xl border px-3 py-2 text-xs ${
+                              done
+                                ? "border-emerald-900/60 bg-emerald-950/30 text-emerald-200"
+                                : "border-zinc-800 bg-zinc-950 text-zinc-200"
+                            }`}
+                          >
+                            {done ? "Checked In" : "Check In"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            <div className="mt-6 text-xs text-zinc-500">
+              Pro tip: After check-in, go to <span className="font-mono">/today</span> and Save Log to rack XP.
+            </div>
+          </section>
+
+          {/* Right: Map */}
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6 lg:col-span-4">
+            <div className="text-sm font-semibold text-zinc-200">Dungeon Map</div>
+            <div className="mt-1 text-xs text-zinc-400">
+              Pins appear only where lat/lng are provided.
+            </div>
+
+            <div className="mt-4 overflow-hidden rounded-2xl border border-zinc-800">
+              <div ref={mapContainerRef} style={{ width: "100%", height: 520 }} />
+            </div>
+
+            {!hasCoords ? (
+              <div className="mt-4 rounded-xl border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-xs text-amber-200">
+                This zone currently has no coordinates. Add lat/lng in the <span className="font-mono">locations</span> table to enable pins.
+              </div>
+            ) : null}
+          </section>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+function escapeHtml(s: string) {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+
+⸻
+
+3) (Optional but highly recommended) Add lat/lng later
+
+Map pins only work when locations.lat and locations.lng are populated.
+
+Fast ways to populate:
+	•	manually paste coordinates for each location
+	•	add a small “Admin Locations” page that geocodes addresses (later)
+
+⸻
+
+4) Next upgrade (if you want)
+
+I can generate:
+	•	/admin/locations page (edit zones, add new dungeons, set lat/lng)
+	•	a “Dungeon Raid” badge system (first check-in per zone, 7-day streak, etc.)
+	•	map check-ins that also award bonus XP (right now check-in just completes the quest)
+
+Say: “Generate admin locations page” if you want that next.

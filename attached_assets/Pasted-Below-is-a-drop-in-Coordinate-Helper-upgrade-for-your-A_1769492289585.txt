@@ -1,0 +1,185 @@
+Below is a drop-in “Coordinate Helper” upgrade for your Admin Locations page that lets you:
+
+✅ paste a Google Maps URL (or any URL containing @lat,lng or ?q=lat,lng)
+✅ paste raw lat,lng
+✅ auto-extract + populate Lat and Lng in the “Add Location” form
+✅ optional: “Apply to Selected Row” (bulk helper per existing location)
+
+I’m giving you:
+	1.	A robust parseLatLng() helper
+	2.	UI block to add under “Add Location”
+	3.	Optional “Row helper” dropdown + apply action
+
+⸻
+
+1) Add helper function (put at bottom of app/admin/locations/page.tsx)
+
+Add this below your Field() component (same file):
+
+function parseLatLng(input: string): { lat: number; lng: number } | null {
+  const s = (input || "").trim();
+
+  // 1) raw "lat,lng"
+  const raw = s.match(/(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/);
+  if (raw) return { lat: Number(raw[1]), lng: Number(raw[2]) };
+
+  // 2) Google Maps "@lat,lng" (common share links)
+  const at = s.match(/@(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/);
+  if (at) return { lat: Number(at[1]), lng: Number(at[2]) };
+
+  // 3) "q=lat,lng" or "query=lat,lng"
+  const q = s.match(/[?&](q|query)=(-?\d{1,3}\.\d+)%2C(-?\d{1,3}\.\d+)/i);
+  if (q) return { lat: Number(q[2]), lng: Number(q[3]) };
+
+  // 4) "q=lat,lng" not URL-encoded comma
+  const q2 = s.match(/[?&](q|query)=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/i);
+  if (q2) return { lat: Number(q2[2]), lng: Number(q2[3]) };
+
+  // 5) "ll=lat,lng"
+  const ll = s.match(/[?&]ll=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/i);
+  if (ll) return { lat: Number(ll[1]), lng: Number(ll[2]) };
+
+  return null;
+}
+
+
+⸻
+
+2) Add state for the helper (near your other useStates)
+
+Inside AdminLocationsPage() add these:
+
+  // Coordinate helper
+  const [coordInput, setCoordInput] = useState<string>("");
+  const [coordPreview, setCoordPreview] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Optional: apply to existing row
+  const [selectedLocationId, setSelectedLocationId] = useState<number | "">( "");
+
+
+⸻
+
+3) Add a useEffect to preview parsed coordinates
+
+Add inside component:
+
+  useEffect(() => {
+    const parsed = parseLatLng(coordInput);
+    setCoordPreview(parsed);
+  }, [coordInput]);
+
+
+⸻
+
+4) Add the Coordinate Helper UI (under “Add Location” form)
+
+In the left card (Add Location section), insert this block above the “Create Location” button:
+
+                <div className="mt-2 rounded-2xl border border-zinc-800 bg-zinc-950 p-4">
+                  <div className="text-sm font-semibold text-zinc-200">Coordinate Helper</div>
+                  <div className="mt-1 text-xs text-zinc-400">
+                    Paste a Google Maps link or raw <span className="font-mono">lat,lng</span>.
+                  </div>
+
+                  <input
+                    value={coordInput}
+                    onChange={(e) => setCoordInput(e.target.value)}
+                    className="mt-3 w-full rounded-xl border border-zinc-800 bg-zinc-900/30 px-4 py-3 text-sm outline-none focus:border-zinc-600"
+                    placeholder='Example: https://maps.google.com/.../@29.7604,-95.3698,17z or "29.7604,-95.3698"'
+                  />
+
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900/20 px-3 py-2 text-xs text-zinc-300">
+                      {coordPreview
+                        ? `Detected: ${coordPreview.lat.toFixed(6)}, ${coordPreview.lng.toFixed(6)}`
+                        : "No coordinates detected yet."}
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={!coordPreview}
+                      onClick={() => {
+                        if (!coordPreview) return;
+                        setNewLoc({
+                          ...newLoc,
+                          lat: String(coordPreview.lat),
+                          lng: String(coordPreview.lng),
+                        });
+                        setMsg("Coordinates applied to Add Location form.");
+                      }}
+                      className="rounded-xl bg-zinc-100 px-3 py-2 text-xs font-semibold text-zinc-950 disabled:opacity-50"
+                    >
+                      Apply to Add Form
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCoordInput("");
+                        setCoordPreview(null);
+                      }}
+                      className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  {/* Optional: Apply to existing row */}
+                  <div className="mt-4 border-t border-zinc-800 pt-4">
+                    <div className="text-xs font-semibold text-zinc-300">
+                      Optional: Apply to an existing location row
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <select
+                        value={selectedLocationId}
+                        onChange={(e) => setSelectedLocationId(e.target.value ? Number(e.target.value) : "")}
+                        className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-zinc-600"
+                      >
+                        <option value="">Select location…</option>
+                        {locations.map((l) => (
+                          <option key={l.id} value={l.id}>
+                            #{l.id} — {l.name}
+                          </option>
+                        ))}
+                      </select>
+
+                      <button
+                        type="button"
+                        disabled={!coordPreview || !selectedLocationId}
+                        onClick={() => {
+                          if (!coordPreview || !selectedLocationId) return;
+                          patchLocation(Number(selectedLocationId), {
+                            lat: coordPreview.lat as any,
+                            lng: coordPreview.lng as any,
+                          });
+                          setMsg("Coordinates applied to selected row.");
+                        }}
+                        className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 disabled:opacity-50"
+                      >
+                        Apply to Selected Row
+                      </button>
+                    </div>
+
+                    <div className="mt-2 text-[11px] text-zinc-500">
+                      Tip: Use this when someone sends you a Google Maps share link for a new dungeon.
+                    </div>
+                  </div>
+                </div>
+
+
+⸻
+
+5) Tiny improvement (recommended): keep locations sorted in dropdown
+
+You already sort in the API, so the dropdown will be sorted.
+
+⸻
+
+Done ✅
+
+Now you can:
+	•	paste a Maps link → click Apply to Add Form → create location
+	•	or select an existing row → Apply to Selected Row → saved immediately
+
+If you want the next “elite admin” upgrade: I can add a “Paste Place Name → auto-fill address + coords” using Mapbox Geocoding (one API call, no Google dependencies).

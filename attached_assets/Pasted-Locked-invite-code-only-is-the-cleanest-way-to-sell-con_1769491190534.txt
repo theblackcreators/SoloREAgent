@@ -1,0 +1,318 @@
+Locked — invite code only is the cleanest way to sell + control cohorts.
+
+Below is everything you need:
+	1.	SQL tables for invite codes + redemptions
+	2.	RLS policies (optional but good hygiene)
+	3.	/api/join route (user enters code → joins cohort → stats initialized)
+	4.	/api/admin/create-invite route (admins generate codes)
+
+⸻
+
+1) Supabase SQL: Invite Codes + Redemptions
+
+Run in Supabase → SQL Editor:
+
+-- Invite codes for a cohort (invite-only onboarding)
+create table if not exists public.cohort_invites (
+  id bigserial primary key,
+  cohort_id bigint not null references public.cohorts(id) on delete cascade,
+  code text not null unique,                 -- store plaintext for MVP
+  role public.member_role not null default 'agent',
+  max_uses int not null default 1,           -- 1 = single-use
+  uses int not null default 0,
+  expires_at timestamptz,
+  is_active boolean not null default true,
+  created_by uuid references auth.users(id),
+  created_at timestamptz default now()
+);
+
+create table if not exists public.invite_redemptions (
+  id bigserial primary key,
+  invite_id bigint not null references public.cohort_invites(id) on delete cascade,
+  cohort_id bigint not null references public.cohorts(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  redeemed_at timestamptz default now(),
+  unique(invite_id, user_id)
+);
+
+-- Helpful index
+create index if not exists idx_invites_cohort on public.cohort_invites(cohort_id);
+create index if not exists idx_redemptions_user on public.invite_redemptions(user_id);
+
+Later upgrade (optional): store code_hash instead of plaintext and compare via hashing.
+
+⸻
+
+2) RLS (optional but recommended)
+
+Enable RLS:
+
+alter table public.cohort_invites enable row level security;
+alter table public.invite_redemptions enable row level security;
+
+Allow admins/coaches in the cohort to read invites + redemptions (agents cannot):
+
+create policy "invites_read_coach_admin" on public.cohort_invites
+for select using (
+  exists (
+    select 1 from public.cohort_memberships m
+    where m.cohort_id = cohort_invites.cohort_id
+      and m.user_id = auth.uid()
+      and m.role in ('coach','admin')
+  )
+);
+
+create policy "redemptions_read_coach_admin" on public.invite_redemptions
+for select using (
+  exists (
+    select 1 from public.cohort_memberships m
+    where m.cohort_id = invite_redemptions.cohort_id
+      and m.user_id = auth.uid()
+      and m.role in ('coach','admin')
+  )
+);
+
+For writes, you’ll use service role in API routes, so you don’t need insert/update policies.
+
+⸻
+
+3) Join Cohort Route (Invite Code Only)
+
+app/api/join/route.ts
+	•	Requires user to be logged in
+	•	Validates invite code (active, not expired, uses < max_uses)
+	•	Creates cohort_memberships + member_stats (E rank defaults)
+	•	Increments invite uses + creates redemption row
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+// Utility: get user from Authorization Bearer token
+async function getUserIdFromBearer(req: Request) {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  if (error) return null;
+  return data.user?.id ?? null;
+}
+
+export async function POST(req: Request) {
+  const { code, profile } = await req.json(); // profile optional (name, height_in, weight_lb, age, trec, boards, zones)
+
+  if (!code || typeof code !== "string") {
+    return NextResponse.json({ error: "Invite code required" }, { status: 400 });
+  }
+
+  const userId = await getUserIdFromBearer(req);
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // 1) Fetch invite
+  const { data: invite, error: invErr } = await supabaseAdmin
+    .from("cohort_invites")
+    .select("id, cohort_id, role, max_uses, uses, expires_at, is_active")
+    .eq("code", code.trim())
+    .single();
+
+  if (invErr || !invite) {
+    return NextResponse.json({ error: "Invalid invite code" }, { status: 400 });
+  }
+
+  if (!invite.is_active) {
+    return NextResponse.json({ error: "Invite code is inactive" }, { status: 400 });
+  }
+
+  if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
+    return NextResponse.json({ error: "Invite code expired" }, { status: 400 });
+  }
+
+  if (invite.uses >= invite.max_uses) {
+    return NextResponse.json({ error: "Invite code has been used" }, { status: 400 });
+  }
+
+  const cohortId = invite.cohort_id;
+
+  // 2) Prevent double-join
+  const { data: existing } = await supabaseAdmin
+    .from("cohort_memberships")
+    .select("id")
+    .eq("cohort_id", cohortId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (existing) {
+    return NextResponse.json({ ok: true, cohortId, message: "Already joined" });
+  }
+
+  // 3) Create membership
+  const { error: memErr } = await supabaseAdmin
+    .from("cohort_memberships")
+    .insert({ cohort_id: cohortId, user_id: userId, role: invite.role });
+
+  if (memErr) return NextResponse.json({ error: memErr.message }, { status: 400 });
+
+  // 4) Upsert profile (optional)
+  // If you already create profiles on sign-up, you can remove this.
+  if (profile && typeof profile === "object") {
+    const safe = {
+      id: userId,
+      name: profile.name ?? "Agent",
+      height_in: profile.height_in ?? null,
+      weight_lb: profile.weight_lb ?? null,
+      age: profile.age ?? null,
+      trec: profile.trec ?? null,
+      boards: profile.boards ?? null,
+      zones: profile.zones ?? null,
+    };
+
+    await supabaseAdmin.from("profiles").upsert(safe, { onConflict: "id" });
+  }
+
+  // 5) Init stats for this cohort
+  const { error: statErr } = await supabaseAdmin
+    .from("member_stats")
+    .upsert(
+      {
+        cohort_id: cohortId,
+        user_id: userId,
+        xp: 0,
+        rank: "E",
+        streak: 0,
+        str: 10,
+        sta: 12,
+        agi: 8,
+        int_stat: 15,
+        cha: 10,
+        rep: 5,
+        gold: 0,
+      },
+      { onConflict: "cohort_id,user_id" }
+    );
+
+  if (statErr) return NextResponse.json({ error: statErr.message }, { status: 400 });
+
+  // 6) Redemption + increment uses (transaction-like sequence)
+  await supabaseAdmin.from("invite_redemptions").insert({
+    invite_id: invite.id,
+    cohort_id: cohortId,
+    user_id: userId,
+  });
+
+  await supabaseAdmin
+    .from("cohort_invites")
+    .update({ uses: invite.uses + 1 })
+    .eq("id", invite.id);
+
+  return NextResponse.json({ ok: true, cohortId, role: invite.role });
+}
+
+Client-side call
+
+Send the user’s Supabase access token as Bearer:
+
+await fetch("/api/join", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${session.access_token}`,
+  },
+  body: JSON.stringify({ code: inviteCode, profile: {/* optional */} }),
+});
+
+
+⸻
+
+4) Admin Route: Create Invite Codes
+
+app/api/admin/create-invite/route.ts
+
+This route:
+	•	verifies the requester is admin in that cohort
+	•	creates an invite code (single-use by default)
+
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+function randomCode(len = 10) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no confusing chars
+  let out = "";
+  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+async function getUserIdFromBearer(req: Request) {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) return null;
+  const { data } = await supabaseAdmin.auth.getUser(token);
+  return data.user?.id ?? null;
+}
+
+export async function POST(req: Request) {
+  const userId = await getUserIdFromBearer(req);
+  if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { cohortId, role = "agent", maxUses = 1, expiresAt = null } = await req.json();
+  if (!cohortId) return NextResponse.json({ error: "cohortId required" }, { status: 400 });
+
+  // verify requester is admin in cohort
+  const { data: mem } = await supabaseAdmin
+    .from("cohort_memberships")
+    .select("role")
+    .eq("cohort_id", cohortId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (!mem || mem.role !== "admin") {
+    return NextResponse.json({ error: "Admin only" }, { status: 403 });
+  }
+
+  const code = randomCode(12);
+
+  const { data, error } = await supabaseAdmin
+    .from("cohort_invites")
+    .insert({
+      cohort_id: cohortId,
+      code,
+      role,
+      max_uses: maxUses,
+      expires_at: expiresAt,
+      created_by: userId,
+    })
+    .select("id, code, cohort_id, role, max_uses, expires_at")
+    .single();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+
+  return NextResponse.json({ ok: true, invite: data });
+}
+
+
+⸻
+
+5) One more thing you’ll want (so it works smoothly)
+
+Create a “platform admin” (first admin bootstrap)
+
+Since you’ll be the first user, you can manually promote yourself in SQL once:
+
+-- Replace with your auth user UUID after signup
+update public.cohort_memberships
+set role = 'admin'
+where user_id = 'YOUR_USER_UUID'
+  and cohort_id = (select id from public.cohorts where name='Houston S1 2026' limit 1);
+
+
+⸻
+
+Next: I can also generate the Invite-only UI flow
+
+If you want, I’ll paste:
+	•	/join page (invite code entry)
+	•	/admin/invites page (create + list invites)
+	•	plus a “copy invite link” format like: yourapp.com/join?code=XXXX
+
+Say “Generate the UI pages” and tell me your preferred brand name for the app (e.g., SoloAgent, HunterCRM, RealEstate Leveling System).
