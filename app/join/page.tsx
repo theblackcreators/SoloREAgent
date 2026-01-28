@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { authedFetch } from "@/lib/authedFetch";
 import { useSearchParams } from "next/navigation";
 
-export default function JoinPage() {
+function JoinForm() {
   const searchParams = useSearchParams();
   const [code, setCode] = useState(searchParams?.get("code") || "");
   const [displayName, setDisplayName] = useState("");
@@ -121,6 +121,24 @@ export default function JoinPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// Loading fallback for Suspense
+function JoinLoading() {
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center p-6">
+      <div className="text-zinc-400">Loading...</div>
+    </div>
+  );
+}
+
+// Main page component with Suspense boundary
+export default function JoinPage() {
+  return (
+    <Suspense fallback={<JoinLoading />}>
+      <JoinForm />
+    </Suspense>
   );
 }
 
