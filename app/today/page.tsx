@@ -160,13 +160,13 @@ export default function TodayPage() {
           <h2 className="text-2xl font-semibold mb-6">Activity</h2>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <InputField label="Steps" type="number" value={steps} onChange={(v) => setSteps(Number(v))} />
-            <InputField label="Learning Minutes" type="number" value={learningMinutes} onChange={(v) => setLearningMinutes(Number(v))} />
-            <InputField label="Calls" type="number" value={calls} onChange={(v) => setCalls(Number(v))} />
-            <InputField label="Texts" type="number" value={texts} onChange={(v) => setTexts(Number(v))} />
-            <InputField label="Convos" type="number" value={convos} onChange={(v) => setConvos(Number(v))} />
-            <InputField label="Leads" type="number" value={leads} onChange={(v) => setLeads(Number(v))} />
-            <InputField label="Appts" type="number" value={appts} onChange={(v) => setAppts(Number(v))} />
+            <InputField label="Steps" type="number" value={steps} onChange={(v: string) => setSteps(Number(v))} />
+            <InputField label="Learning Minutes" type="number" value={learningMinutes} onChange={(v: string) => setLearningMinutes(Number(v))} />
+            <InputField label="Calls" type="number" value={calls} onChange={(v: string) => setCalls(Number(v))} />
+            <InputField label="Texts" type="number" value={texts} onChange={(v: string) => setTexts(Number(v))} />
+            <InputField label="Convos" type="number" value={convos} onChange={(v: string) => setConvos(Number(v))} />
+            <InputField label="Leads" type="number" value={leads} onChange={(v: string) => setLeads(Number(v))} />
+            <InputField label="Appts" type="number" value={appts} onChange={(v: string) => setAppts(Number(v))} />
           </div>
 
           <div className="space-y-4 mb-6">
