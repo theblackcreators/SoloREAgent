@@ -24,6 +24,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@tailwindcss/typography": "^0.5.19",
     "@types/mapbox-gl": "^3.1.0",
     "@types/node": "^20.11.0",
     "@types/react": "^18.3.11",
