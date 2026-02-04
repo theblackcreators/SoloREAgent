@@ -29,10 +29,29 @@ export default function HomePage() {
 
   useEffect(() => {
     async function checkAuth() {
-      const user = await getCurrentUser();
-      if (user) {
-        router.push("/dashboard");
-      } else {
+      try {
+        // Add timeout to prevent hanging indefinitely
+        const timeoutPromise = new Promise<null>((resolve) => {
+          setTimeout(() => {
+            console.warn("Auth check timed out after 5 seconds");
+            resolve(null);
+          }, 5000);
+        });
+
+        // Race between auth check and timeout
+        const user = await Promise.race([
+          getCurrentUser(),
+          timeoutPromise,
+        ]);
+
+        if (user) {
+          router.push("/dashboard");
+        } else {
+          setChecking(false);
+        }
+      } catch (error) {
+        console.error("Auth check failed:", error);
+        // On error, show the landing page instead of staying stuck
         setChecking(false);
       }
     }

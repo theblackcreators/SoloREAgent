@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabaseClient";
+import { supabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import { Provider } from "@supabase/supabase-js";
 
 export type AuthError = {
@@ -119,12 +119,31 @@ export async function updatePassword(newPassword: string): Promise<AuthResult> {
 
 /**
  * Get current user
+ * Returns null if Supabase is not configured or if there's an error
  */
 export async function getCurrentUser() {
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  return user;
+  // Return null early if Supabase is not configured
+  if (!isSupabaseConfigured) {
+    console.warn("Supabase not configured - returning null user");
+    return null;
+  }
+
+  try {
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser();
+
+    if (error) {
+      console.warn("Error getting current user:", error.message);
+      return null;
+    }
+
+    return user;
+  } catch (err) {
+    console.warn("Exception getting current user:", err);
+    return null;
+  }
 }
 
 /**
