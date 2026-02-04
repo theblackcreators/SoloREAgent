@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { computeRank, getNextRank } from "@/lib/ranks";
 import Link from "next/link";
+import { WeeklySummary } from "@/components/WeeklySummary";
 
 type Stats = {
   xp: number;
@@ -121,6 +122,11 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
       <div className="max-w-6xl mx-auto">
         <h1 className="text-4xl font-bold mb-8">Agent HUD</h1>
+
+        {/* Weekly Summary */}
+        <div className="mb-8">
+          <WeeklySummary cohortId={cohortId} />
+        </div>
 
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">

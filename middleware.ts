@@ -5,8 +5,16 @@ import type { NextRequest } from "next/server";
 // Routes that require authentication
 const protectedRoutes = [
   "/dashboard",
+  "/plan",
   "/today",
+  "/logs",
   "/map",
+  "/analytics",
+  "/leaderboard",
+  "/achievements",
+  "/resources",
+  "/shop",
+  "/profile",
   "/admin",
 ];
 

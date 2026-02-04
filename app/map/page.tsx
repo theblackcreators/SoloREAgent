@@ -28,6 +28,9 @@ export default function MapPage() {
   const [locations, setLocations] = useState<Location[]>([]);
   const [selectedZone, setSelectedZone] = useState<string>("All");
   const [feedback, setFeedback] = useState("");
+  const [checkingIn, setCheckingIn] = useState<number | null>(null);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [gettingLocation, setGettingLocation] = useState(false);
 
   useEffect(() => {
     loadMap();
@@ -150,22 +153,89 @@ export default function MapPage() {
     });
   }
 
+  async function getUserCurrentLocation(): Promise<{ lat: number; lng: number } | null> {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) {
+        setFeedback("❌ Geolocation is not supported by your browser");
+        resolve(null);
+        return;
+      }
+
+      setGettingLocation(true);
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const coords = {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          };
+          setUserLocation(coords);
+          setGettingLocation(false);
+          resolve(coords);
+        },
+        (error) => {
+          setGettingLocation(false);
+          switch (error.code) {
+            case error.PERMISSION_DENIED:
+              setFeedback("❌ Location access denied. Please enable GPS.");
+              break;
+            case error.POSITION_UNAVAILABLE:
+              setFeedback("❌ Location unavailable. Please try again.");
+              break;
+            case error.TIMEOUT:
+              setFeedback("❌ Location request timed out. Please try again.");
+              break;
+            default:
+              setFeedback("❌ Failed to get your location.");
+          }
+          resolve(null);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    });
+  }
+
   async function handleCheckIn(locationId: number) {
     if (!cohortId) return;
 
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+    setCheckingIn(locationId);
+    setFeedback("");
 
-      const { error } = await supabase.from("location_check_ins").insert({
-        user_id: user.id,
-        cohort_id: cohortId,
-        location_id: locationId,
-        checked_in_at: new Date().toISOString(),
+    try {
+      // Get user's current location
+      const coords = await getUserCurrentLocation();
+      if (!coords) {
+        setCheckingIn(null);
+        return;
+      }
+
+      // Get auth token
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        setFeedback("❌ Please log in again");
+        setCheckingIn(null);
+        return;
+      }
+
+      // Call the check-in API with geolocation
+      const res = await fetch("/api/map/checkin", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          locationId,
+          cohortId,
+          userLat: coords.lat,
+          userLng: coords.lng,
+        }),
       });
 
-      if (error) {
-        setFeedback(`❌ ${error.message}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        setFeedback(`❌ ${data.error}`);
+        setCheckingIn(null);
         return;
       }
 
@@ -176,9 +246,16 @@ export default function MapPage() {
         )
       );
 
-      setFeedback("✅ Checked in! Dungeon quest auto-completed.");
+      // Build success message
+      let msg = `✅ Checked in at ${data.location}! +${data.xpEarned} XP`;
+      if (data.achievements && data.achievements.length > 0) {
+        msg += ` | 🏆 Achievement: ${data.achievements[0].name}`;
+      }
+      setFeedback(msg);
     } catch (error: any) {
       setFeedback(`❌ ${error.message}`);
+    } finally {
+      setCheckingIn(null);
     }
   }
 
@@ -239,9 +316,10 @@ export default function MapPage() {
                   {!loc.checked_in && (
                     <button
                       onClick={() => handleCheckIn(loc.id)}
-                      className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+                      disabled={checkingIn === loc.id || gettingLocation}
+                      className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Check In
+                      {checkingIn === loc.id ? (gettingLocation ? "📍 Getting location..." : "Checking in...") : "Check In"}
                     </button>
                   )}
                   {loc.checked_in && (

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { applyRateLimit, RATE_LIMITS } from "@/lib/rateLimit";
 
 async function getUserIdFromBearer(req: Request) {
   const auth = req.headers.get("authorization") || "";
@@ -10,6 +11,10 @@ async function getUserIdFromBearer(req: Request) {
 }
 
 export async function POST(req: Request) {
+  // Apply rate limiting (auth-level since it's invite redemption)
+  const rateLimited = applyRateLimit(req, RATE_LIMITS.auth, "join");
+  if (rateLimited) return rateLimited;
+
   const userId = await getUserIdFromBearer(req);
   if (!userId)
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

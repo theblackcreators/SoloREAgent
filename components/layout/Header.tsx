@@ -4,12 +4,14 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signOut } from "@/lib/auth";
+import { NotificationBell } from "@/components/NotificationBell";
 
 interface HeaderProps {
   showNav?: boolean;
+  cohortId?: number | null;
 }
 
-export function Header({ showNav = true }: HeaderProps) {
+export function Header({ showNav = true, cohortId = null }: HeaderProps) {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -36,13 +38,25 @@ export function Header({ showNav = true }: HeaderProps) {
           {showNav && (
             <nav className="hidden md:flex items-center gap-6">
               <NavLink href="/dashboard">Dashboard</NavLink>
+              <NavLink href="/plan">Plan</NavLink>
               <NavLink href="/today">Today</NavLink>
+              <NavLink href="/logs">Logs</NavLink>
               <NavLink href="/map">Map</NavLink>
+              <NavLink href="/resources">Resources</NavLink>
+              <NavLink href="/shop">Shop</NavLink>
+              <NavLink href="/analytics">Analytics</NavLink>
+              <NavLink href="/leaderboard">Leaderboard</NavLink>
+              <NavLink href="/achievements">Achievements</NavLink>
             </nav>
           )}
 
-          {/* User menu */}
-          <div className="relative">
+          {/* Right side: Notifications + User menu */}
+          <div className="flex items-center gap-2">
+            {/* Notification Bell */}
+            <NotificationBell cohortId={cohortId} />
+
+            {/* User menu */}
+            <div className="relative">
             <button
               onClick={() => setMenuOpen(!menuOpen)}
               className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-zinc-800 transition-colors"
@@ -66,13 +80,31 @@ export function Header({ showNav = true }: HeaderProps) {
                     <Link href="/dashboard" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
                       Dashboard
                     </Link>
+                    <Link href="/plan" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
+                      Daily Plan
+                    </Link>
                     <Link href="/today" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
                       Today
+                    </Link>
+                    <Link href="/logs" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
+                      Logs
                     </Link>
                     <Link href="/map" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
                       Map
                     </Link>
+                    <Link href="/analytics" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
+                      Analytics
+                    </Link>
+                    <Link href="/leaderboard" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
+                      Leaderboard
+                    </Link>
+                    <Link href="/achievements" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
+                      Achievements
+                    </Link>
                   </div>
+                  <Link href="/profile" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
+                    Profile
+                  </Link>
                   <Link href="/admin/invites" className="block px-4 py-3 text-zinc-300 hover:bg-zinc-800 transition-colors" onClick={() => setMenuOpen(false)}>
                     Admin
                   </Link>
@@ -86,6 +118,7 @@ export function Header({ showNav = true }: HeaderProps) {
                 </div>
               </>
             )}
+          </div>
           </div>
         </div>
       </div>

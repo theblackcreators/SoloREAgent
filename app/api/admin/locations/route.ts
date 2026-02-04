@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { logAuditEvent, getRequestMetadata } from "@/lib/auditLog";
 
 async function getUserIdFromBearer(req: Request) {
   const auth = req.headers.get("authorization") || "";
@@ -105,6 +106,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
 
+  // Log audit event
+  const metadata = getRequestMetadata(req);
+  await logAuditEvent({
+    userId,
+    programId: pid,
+    cohortId: cid,
+    action: "create",
+    entityType: "location",
+    entityId: newLocation.id,
+    entityName: newLocation.name,
+    newValues: newLocation,
+    ...metadata,
+  });
+
   return NextResponse.json({ ok: true, location: newLocation });
 }
 
@@ -161,6 +176,19 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
 
+  // Log audit event
+  const metadata = getRequestMetadata(req);
+  await logAuditEvent({
+    userId,
+    cohortId: cid,
+    action: "update",
+    entityType: "location",
+    entityId: updated.id,
+    entityName: updated.name,
+    newValues: updates,
+    ...metadata,
+  });
+
   return NextResponse.json({ ok: true, location: updated });
 }
 
@@ -192,6 +220,13 @@ export async function DELETE(req: Request) {
     );
   }
 
+  // Get location before deleting for audit log
+  const { data: location } = await supabaseAdmin
+    .from("locations")
+    .select("*")
+    .eq("id", locationId)
+    .single();
+
   const { error } = await supabaseAdmin
     .from("locations")
     .delete()
@@ -200,6 +235,19 @@ export async function DELETE(req: Request) {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
+
+  // Log audit event
+  const metadata = getRequestMetadata(req);
+  await logAuditEvent({
+    userId,
+    cohortId: cid,
+    action: "delete",
+    entityType: "location",
+    entityId: id,
+    entityName: location?.name,
+    oldValues: location,
+    ...metadata,
+  });
 
   return NextResponse.json({ ok: true });
 }

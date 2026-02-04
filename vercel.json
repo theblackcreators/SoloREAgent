@@ -1,8 +1,16 @@
 {
   "crons": [
     {
+      "path": "/api/cron/generate-daily-plans",
+      "schedule": "0 5 * * *"
+    },
+    {
       "path": "/api/generate-daily",
       "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/cron/daily-reminders",
+      "schedule": "0 18 * * *"
     }
   ]
 }

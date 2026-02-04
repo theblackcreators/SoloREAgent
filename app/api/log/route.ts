@@ -4,6 +4,7 @@ import { xpFromLog, statGainsFromLog } from "@/lib/engine";
 import { computeRank } from "@/lib/ranks";
 import { evaluateRule } from "@/lib/ruleEngine";
 import { addDaysUTC, parseISODateToUTC, toISODateUTC } from "@/lib/date";
+import { notifyRankUp, notifyStreakBroken, checkStreakWarning } from "@/lib/notifications";
 
 type LogShape = {
   steps: number;
@@ -328,6 +329,37 @@ export async function POST(req: Request) {
 
   if (upErr)
     return NextResponse.json({ error: upErr.message }, { status: 400 });
+
+  // 3b) Send notifications for rank ups and streak changes
+  const oldRank = statsRow.rank || "E";
+  const oldStreak = Number(statsRow.streak ?? 0);
+
+  // Check for rank up
+  if (nextRank !== oldRank) {
+    try {
+      await notifyRankUp(userId, cid, oldRank, nextRank);
+    } catch (e) {
+      console.error("Failed to send rank up notification:", e);
+    }
+  }
+
+  // Check for streak broken (had a streak, now it's 0)
+  if (oldStreak > 0 && nextStreak === 0) {
+    try {
+      await notifyStreakBroken(userId, cid, oldStreak);
+    } catch (e) {
+      console.error("Failed to send streak broken notification:", e);
+    }
+  }
+
+  // Check for streak warning (streak is getting long, remind them to keep it)
+  if (nextStreak >= 3) {
+    try {
+      await checkStreakWarning(userId, cid, nextStreak);
+    } catch (e) {
+      console.error("Failed to check streak warning:", e);
+    }
+  }
 
   // 4) Auto-complete today's quests based on NEW log
   const { data: quests, error: qErr } = await supabaseAdmin
